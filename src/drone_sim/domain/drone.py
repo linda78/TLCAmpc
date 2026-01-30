@@ -37,6 +37,7 @@ class Drone:
    radius: float
    safety_zone: float
    cons_stop: float
+   v_max: float
 
    color: Color
    safety_color: Color

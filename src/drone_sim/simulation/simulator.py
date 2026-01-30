@@ -89,7 +89,7 @@ class Simulator:
          trace_color = _normalize_color(drone_cfg.trace_color or drone_cfg.drone_color)
 
          drones.append(Drone(drone_id=drone_cfg.drone_id, radius=drone_cfg.radius, safety_zone=drone_cfg.safety_zone,
-                             cons_stop=drone_cfg.cons_stop, color=drone_color, safety_color=safety_color,
+                             cons_stop=drone_cfg.cons_stop, v_max=drone_cfg.v_max, color=drone_color, safety_color=safety_color,
                              trace_color=trace_color, controller=controller, x=x0, route=route))
 
       obstacles = [(np.asarray(o.center, dtype=float), float(o.radius)) for o in cfg.obstacles]
@@ -202,7 +202,8 @@ class Simulator:
          try:
             u_by_id = self.coordinator.solve_controls(drone_ids=[d.drone_id for d in self.drones], xs=[d.x for d in self.drones], prefs=prefs,
                                                       radii=[d.radius for d in self.drones], safety_zones=[d.safety_zone for d in self.drones],
-                                                      cons_stops=[d.cons_stop for d in self.drones], controllers=[d.controller for d in self.drones],
+                                                      cons_stops=[d.cons_stop for d in self.drones], v_maxs=[d.v_max for d in self.drones],
+                                                      controllers=[d.controller for d in self.drones],
                                                       obstacles=self.obstacles, all_drone_state=all_drone_state, room_min=self.room_min, room_max=self.room_max)
 
          except RuntimeError as exc:

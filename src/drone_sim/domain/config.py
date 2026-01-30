@@ -35,6 +35,9 @@ class DroneConfig(BaseModel):
    # Conservative stopping addition, like it is shown in the paper
    cons_stop: float = 0.0
 
+   # Maximum velocity magnitude (m/s) for trajectory optimization constraint.
+   v_max: float = 5.0
+
    # Colors used by the renderer. Each field accepts either:
    # - a matplotlib-compatible color string (e.g. "red", "tab:blue", "#ff00aa")
    # - an RGB list [r,g,b] either in 0..1 or 0..255.

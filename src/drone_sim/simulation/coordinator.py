@@ -104,7 +104,8 @@ class CentralMPCGlobalCoordinator:
       return u
 
    def solve_controls(self, *, drone_ids: list[str], xs: list[np.ndarray], prefs: list[np.ndarray], radii: list[float],
-                      safety_zones: list[float], cons_stops: list[float], controllers: list[object],
+                      safety_zones: list[float], cons_stops: list[float], v_maxs: list[float] | None = None,
+                      controllers: list[object],
                       obstacles: list[tuple[np.ndarray, float]],
                       # Optional override trajectories for external drones: id -> (H,3):
                       external_predictions: dict[str, np.ndarray] | None = None,
@@ -126,6 +127,11 @@ class CentralMPCGlobalCoordinator:
       safety_by_id = {did: float(safety_zones[i]) for i, did in enumerate(drone_ids)}
       radii_by_id = {did: float(radii[i]) for i, did in enumerate(drone_ids)}
       cons_stops_by_id = {did: float(cons_stops[i]) for i, did in enumerate(drone_ids)}
+      # Build v_max lookup; default to 5.0 m/s if not provided.
+      if v_maxs is None:
+         v_max_by_id = {did: 5.0 for did in drone_ids}
+      else:
+         v_max_by_id = {did: float(v_maxs[i]) for i, did in enumerate(drone_ids)}
 
       opt_ids = [drone_ids[i] for i in idx_opt]
       M = len(idx_opt)
@@ -188,8 +194,8 @@ class CentralMPCGlobalCoordinator:
          for _ in range(12):
             u0 = clip_u(alpha * u_guess)
             if (self._constraints(self._pack(u0), xs0=xs0, opt_ids=opt_ids, safety_by_id=safety_by_id,
-                                  radii_by_id=radii_by_id, cons_stops_by_id=cons_stops_by_id, P_ext=ext_pred,
-                                  obstacles=obstacles, room_min=room_min, room_max=room_max).min(initial=0.0) >= 0.0):
+                                  radii_by_id=radii_by_id, cons_stops_by_id=cons_stops_by_id, v_max_by_id=v_max_by_id,
+                                  P_ext=ext_pred, obstacles=obstacles, room_min=room_min, room_max=room_max).min(initial=0.0) >= 0.0):
                break
             alpha *= 0.5
          else:
@@ -204,8 +210,8 @@ class CentralMPCGlobalCoordinator:
       cons = {"type": "ineq",
             "fun": lambda u_flat: self._constraints(u_flat, xs0=xs0, opt_ids=opt_ids, safety_by_id=safety_by_id,
                                                     radii_by_id=radii_by_id, cons_stops_by_id=cons_stops_by_id,
-                                                    P_ext=ext_pred, obstacles=obstacles, room_min=room_min,
-                                                    room_max=room_max)}
+                                                    v_max_by_id=v_max_by_id, P_ext=ext_pred, obstacles=obstacles,
+                                                    room_min=room_min, room_max=room_max)}
 
       res = minimize(
          lambda u_flat: self._cost(u_flat, xs0=xs0, prefs0=prefs0, controllers=[controllers[i] for i in idx_opt],
@@ -218,8 +224,8 @@ class CentralMPCGlobalCoordinator:
          raise RuntimeError(f"CentralMPCGlobalCoordinator optimization failed: {res.message} (status={res.status})")
 
       g = self._constraints(res.x, xs0=xs0, opt_ids=opt_ids, safety_by_id=safety_by_id, radii_by_id=radii_by_id,
-                            cons_stops_by_id=cons_stops_by_id, P_ext=ext_pred, obstacles=obstacles, room_min=room_min,
-                            room_max=room_max)
+                            cons_stops_by_id=cons_stops_by_id, v_max_by_id=v_max_by_id, P_ext=ext_pred,
+                            obstacles=obstacles, room_min=room_min, room_max=room_max)
 
       min_margin = float(g.min(initial=np.inf)) if g.size else float("inf")
       if not np.isfinite(min_margin):
@@ -254,13 +260,16 @@ class CentralMPCGlobalCoordinator:
       return float(total)
 
    def _constraints(self, u_flat: np.ndarray, *, xs0: np.ndarray, opt_ids: list[str], safety_by_id: dict[str, float],
-                    radii_by_id: dict[str, float], cons_stops_by_id: dict[str, float], P_ext: dict[str, np.ndarray],
-                    obstacles: list[tuple[np.ndarray, float]], room_min: np.ndarray | None,
-                    room_max: np.ndarray | None) -> np.ndarray:
+                    radii_by_id: dict[str, float], cons_stops_by_id: dict[str, float], v_max_by_id: dict[str, float],
+                    P_ext: dict[str, np.ndarray], obstacles: list[tuple[np.ndarray, float]],
+                    room_min: np.ndarray | None, room_max: np.ndarray | None) -> np.ndarray:
       """Inequality constraints c(u) >= 0 using owner-only safety-zone rule.
 
           For each optimized drone A and any other object B:
               ||p_A - p_B|| >= A.safety_zone + B.safety_buffer
+
+          Velocity constraint for each optimized drone:
+              v_max^2 - ||vel||^2 >= 0
       """
 
       # Build predicted state/position/velocity for optimized drones
@@ -268,6 +277,7 @@ class CentralMPCGlobalCoordinator:
       u = self._unpack(u_flat, M)
       X_opt = self._predict_states(xs0, u)
       P_opt = X_opt[:, :, :3]
+      V_opt = X_opt[:, :, 3:6]  # Velocity components (vx, vy, vz)
 
       vals: list[float] = []
 
@@ -295,6 +305,9 @@ class CentralMPCGlobalCoordinator:
 
       # Room (wall) constraints: ensure each drone's physical sphere stays inside the axis-aligned room box if room bounds are provided.
       self.observe_no_flying_zone(M, P_opt, opt_ids, safety_by_id, room_max, room_min, vals)
+
+      # Velocity magnitude constraints: v_max^2 - ||vel||^2 >= 0 for each drone at each horizon step.
+      self.observe_velocity_limits(M, V_opt, opt_ids, v_max_by_id, vals)
 
       return np.asarray(vals, dtype=float)
 
@@ -338,3 +351,17 @@ class CentralMPCGlobalCoordinator:
                dist = float(np.linalg.norm(pi - Pj[kk]))
                thresh = float(safety_by_id[other_id] + safety_by_id[id_i])
                vals.append(dist - thresh)
+
+   def observe_velocity_limits(self, M, V_opt, opt_ids, v_max_by_id, vals):
+      """Velocity magnitude constraints: v_max^2 - ||vel||^2 >= 0.
+
+      Ensures each drone's velocity magnitude does not exceed its configured v_max
+      at any point during the prediction horizon.
+      """
+      for kk in range(self.horizon):
+         for i in range(M):
+            vel = V_opt[i, kk]  # (vx, vy, vz)
+            v_max = float(v_max_by_id[opt_ids[i]])
+            # Constraint: v_max^2 - (vx^2 + vy^2 + vz^2) >= 0
+            velocity_margin = v_max**2 - float(vel[0]**2 + vel[1]**2 + vel[2]**2)
+            vals.append(velocity_margin)
