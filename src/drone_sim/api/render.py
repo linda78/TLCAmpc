@@ -37,11 +37,16 @@ def _draw_sphere_wireframe(ax: object, center: np.ndarray, radius: float, *, col
 def render_png(*, room_min: np.ndarray, room_max: np.ndarray, drone_positions: list[np.ndarray],
                drone_radii: list[float], drone_safety_zones: list[float], drone_colors: list[object],
                safety_colors: list[object], trace_colors: list[object], drone_traces: list[list[np.ndarray]],
-               obstacles: list[tuple[np.ndarray, float]], step_count: int, compute_time_s: float, width: int = 900,
-               height: int = 700, dpi: int = 120, elev: float = 20.0, azim: float = -60.0) -> bytes:
+               obstacles: list[tuple[np.ndarray, float]], step_count: int, compute_time_s: float,
+               room_radius: float | None = None,
+               width: int = 900, height: int = 700, dpi: int = 120, elev: float = 20.0, azim: float = -60.0) -> bytes:
    """Render a 3D scene to PNG bytes.
 
    This is intentionally simple (matplotlib wireframe room + points) to keep the REST API self-contained.
+
+   Args:
+       room_min, room_max: Bounding box for the room (used for axis limits).
+       room_radius: If set, room is spherical with center at origin. Otherwise rectangular.
    """
 
    # Import matplotlib lazily so the simulation core remains lightweight.
@@ -53,7 +58,13 @@ def render_png(*, room_min: np.ndarray, room_max: np.ndarray, drone_positions: l
 
    ax = fig.add_subplot(111, projection="3d")
 
-   _draw_room_wireframe(ax, room_min, room_max)
+   # Draw room boundary based on geometry type
+   if room_radius is not None:
+      # Spherical room: draw sphere wireframe centered at origin
+      _draw_sphere_wireframe(ax, np.zeros(3), room_radius, color="black", alpha=0.3, lw=0.8, resolution=24)
+   else:
+      # Rectangular room: draw box wireframe
+      _draw_room_wireframe(ax, room_min, room_max)
 
    # Drones (and safety zones)
    if drone_positions:

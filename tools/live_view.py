@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import argparse
 import io
-import json
 import sys
 import time
 from pathlib import Path
-from string import Template
-from typing import Any, NoReturn
+from typing import NoReturn
 
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
@@ -16,28 +14,10 @@ from PIL import Image
 from drone_sim.api.render import render_png
 from drone_sim.domain.config import ScenarioConfig
 from drone_sim.simulation.simulator import Simulator
-from tools import _build_scenario, _all_drones_reached_destination
+from tools.utility.config_creater import create_default_config
+from tools.utility.param_helper import load_parametrized_json, _parse_kv_params
+from tools.utility.metrics_fcts import all_drones_reached_destination
 
-
-def load_parametrized_json(path: str | Path, params: dict[str, str] | None = None) -> dict[str, Any]:
-   """Load a JSON file and substitute `${var}` placeholders.
-
-   This is intentionally minimal: the file contents are treated as a string.Template.
-
-   Notes:
-   - Substitution happens before JSON parsing.
-   - If you want to substitute a *number*, pass the literal (e.g. "0.15").
-   - If you want to substitute a *string*, include quotes in the template or pass a quoted value.
-
-   Example:
-       {"dt": ${dt}}
-   with params {"dt": "0.05"}
-   """
-
-   text = Path(path).read_text(encoding="utf-8")
-   if params:
-      text = Template(text).safe_substitute(params)
-   return json.loads(text)
 
 def create_scenario(config_path: str | Path | None, params: dict[str, str] | None) -> ScenarioConfig:
    if not config_path:
@@ -47,17 +27,15 @@ def create_scenario(config_path: str | Path | None, params: dict[str, str] | Non
       if num_str is None or hor_str is None:
          _die("When --config has no path, you must provide both num_drones=<int> and horizon=<int> via --param.")
 
-      scenario = _build_scenario(num_drones=int(num_str), horizon=int(hor_str))
+      scenario = create_default_config(n_drones=int(num_str), horizon=int(hor_str))
    else:
-      # Load raw JSON (with optional template substitution) and validate as ScenarioConfig.
-      cfg_raw = load_parametrized_json(config_path, params=params)
-      if not isinstance(cfg_raw, str):
-         raise TypeError(f"Config must decode to a JSON object/dict, got {type(cfg_raw).__name__}")
+      # Load JSON (with optional template substitution) and validate as ScenarioConfig.
+      cfg_json = load_parametrized_json(config_path, params=params)
+      if not isinstance(cfg_json, dict):
+         raise TypeError(f"Config must decode to a JSON object/dict, got {type(cfg_json).__name__}")
 
-      scenario = ScenarioConfig.model_validate(json.loads(cfg_raw))
-
-   for param in params:
-      print(f"{param}: {params[param]}")
+      scenario = ScenarioConfig.model_validate(cfg_json)
+      print(scenario)
 
    return scenario
 
@@ -112,6 +90,7 @@ def run_live_view(*, config_path: str | Path | None, params: dict[str, str] | No
             obstacles=sim.obstacles,
             step_count=sim.step_count,
             compute_time_s=sim.compute_time_s,
+            room_radius=sim.room_radius,
             width=width,
             height=height,
             dpi=dpi,
@@ -141,7 +120,7 @@ def run_live_view(*, config_path: str | Path | None, params: dict[str, str] | No
       if sleep_s > 0:
          time.sleep(sleep_s)
 
-      all_reached = _all_drones_reached_destination(sim.drones)
+      all_reached = all_drones_reached_destination(sim.drones)
       print(f"All drones reached: {all_reached}")
 
    plt.ioff()
@@ -155,22 +134,12 @@ def run_live_view(*, config_path: str | Path | None, params: dict[str, str] | No
       frames[0].save(gif_out, save_all=True, append_images=frames[1:], duration=duration_ms, loop=0, optimize=False)
 
 
-def _parse_kv_params(items: list[str]) -> dict[str, str]:
-   out: dict[str, str] = {}
-   for item in items:
-      if "=" not in item:
-         raise ValueError(f"Bad --param '{item}'. Expected KEY=VALUE")
-      k, v = item.split("=", 1)
-      out[k] = v
-   return out
-
-
 def main(argv: list[str] | None = None) -> None:
    p = argparse.ArgumentParser(description="Live-view DroneSim by stepping the simulator and rendering in-process")
    p.add_argument("--config",
                   help="Either a JSON file path (e.g. configs/2DronesHorizon2.json) or param has to set at least 'num_drones' and 'horizon'")
 
-   p.add_argument("--param", action="append", default=[], help="Template parameter KEY=VALUE (may be repeated)")
+   p.add_argument("--param", action="append", default=[], help="Template parameter KEY=VALUE (may be repeated), see @overrite_param.py for details")
    p.add_argument("--steps", type=int, default=500)
    p.add_argument("--step-n", type=int, default=1)
    p.add_argument("--sleep", type=float, default=0.05)

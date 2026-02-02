@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TypeAlias
+from typing import TYPE_CHECKING, TypeAlias
 
 import numpy as np
 
 from drone_sim.controllers.base import Controller
+
+if TYPE_CHECKING:
+   from drone_sim.physics.linear_kinematics import LinearKinematicsPhysics
 
 Color: TypeAlias = str | tuple[float, float, float]
 
@@ -37,7 +40,6 @@ class Drone:
    radius: float
    safety_zone: float
    cons_stop: float
-   v_max: float
 
    color: Color
    safety_color: Color
@@ -47,8 +49,26 @@ class Drone:
    x: np.ndarray  # [x,y,z,vx,vy,vz]
    route: Route
 
+   # Per-drone kinematics model containing v_max constraint.
+   kinematics: "LinearKinematicsPhysics"
+
    def position(self) -> np.ndarray:
       return self.x[:3]
 
    def velocity(self) -> np.ndarray:
       return self.x[3:]
+
+   @property
+   def v_max(self) -> float:
+      """Maximum velocity magnitude from kinematics model."""
+      return self.kinematics.v_max
+
+   @property
+   def u_min(self) -> np.ndarray:
+      """Minimum control input (acceleration) per axis from kinematics model."""
+      return self.kinematics.u_min
+
+   @property
+   def u_max(self) -> np.ndarray:
+      """Maximum control input (acceleration) per axis from kinematics model."""
+      return self.kinematics.u_max

@@ -15,6 +15,7 @@ import numpy as np
 from numpy.testing import assert_array_almost_equal, assert_array_equal
 
 from drone_sim.controllers.central_cost import CentralMPCAgent, as_diagonal
+from drone_sim.physics.linear_kinematics import LinearKinematicsPhysics
 
 
 class TestAsDiag:
@@ -55,38 +56,47 @@ class TestCentralMPCAgentInit:
 
    def test_init_default_values(self):
       """Test CentralMPCAgent initializes with correct default values."""
-      agent = CentralMPCAgent(dt=0.1)
+      physics = LinearKinematicsPhysics(dt=0.1)
+      agent = CentralMPCAgent(dt=0.1, physics=physics)
       assert agent.dt == 0.1
-      assert agent.horizon == 12
-      assert agent.q_pos == (8.0, 8.0, 8.0)
-      assert agent.q_vel == (0.5, 0.5, 0.5)
-      assert agent.r_u == (0.2, 0.2, 0.2)
-      assert agent.u_min == (-3.0, -3.0, -3.0)
-      assert agent.u_max == (3.0, 3.0, 3.0)
+      assert agent.horizon == 5
+      assert agent.q_pos == (1.0, 1.0, 1.0)
+      assert agent.q_vel == (0.1, 0.1, 0.1)
+      assert agent.r_u == (0.01, 0.01, 0.01)
+      # Bounds come from the physics model
+      assert_array_almost_equal(agent.physics.u_min, [-3.0, -3.0, -3.0])
+      assert_array_almost_equal(agent.physics.u_max, [3.0, 3.0, 3.0])
 
    def test_init_custom_values(self):
       """Test CentralMPCAgent initializes with custom values."""
+      physics = LinearKinematicsPhysics(
+         dt=0.05,
+         u_min=[-5.0, -5.0, -5.0],
+         u_max=[5.0, 5.0, 5.0]
+      )
       agent = CentralMPCAgent(
          dt=0.05,
+         physics=physics,
          horizon=20,
          q_pos=[10.0, 10.0, 10.0],
          q_vel=[1.0, 1.0, 1.0],
-         r_u=[0.5, 0.5, 0.5],
-         u_min=[-5.0, -5.0, -5.0],
-         u_max=[5.0, 5.0, 5.0]
+         r_u=[0.5, 0.5, 0.5]
       )
       assert agent.dt == 0.05
       assert agent.horizon == 20
 
-   def test_init_creates_physics_model(self):
-      """Test __post_init__ creates internal physics model."""
-      agent = CentralMPCAgent(dt=0.1)
-      assert hasattr(agent, "_phys")
-      assert agent._phys.dt == 0.1
+   def test_init_uses_passed_physics(self):
+      """Test controller uses the physics model passed at initialization."""
+      physics = LinearKinematicsPhysics(dt=0.1, v_max=2.5)
+      agent = CentralMPCAgent(dt=0.1, physics=physics)
+      assert agent.physics is physics
+      assert agent.physics.dt == 0.1
+      assert agent.physics.v_max == 2.5
 
    def test_init_creates_weight_matrices(self):
       """Test __post_init__ creates weight matrices."""
-      agent = CentralMPCAgent(dt=0.1, q_pos=[1.0, 2.0, 3.0])
+      physics = LinearKinematicsPhysics(dt=0.1)
+      agent = CentralMPCAgent(dt=0.1, physics=physics, q_pos=[1.0, 2.0, 3.0])
       assert agent._Qp.shape == (3, 3)
       assert agent._Qp[0, 0] == 1.0
       assert agent._Qp[1, 1] == 2.0
@@ -115,8 +125,9 @@ class TestCentralMPCAgentCentralBounds:
       assert u_min2[0] != 999.0
 
    def test_central_bounds_custom_bounds(self):
-      """Test central_bounds with custom bound values."""
-      agent = CentralMPCAgent(dt=0.1, u_min=[-10.0, -5.0, -2.0], u_max=[10.0, 5.0, 2.0])
+      """Test central_bounds with custom bound values from physics."""
+      physics = LinearKinematicsPhysics(dt=0.1, u_min=[-10.0, -5.0, -2.0], u_max=[10.0, 5.0, 2.0])
+      agent = CentralMPCAgent(dt=0.1, physics=physics)
       u_min, u_max = agent.central_bounds()
       assert_array_almost_equal(u_min, [-10.0, -5.0, -2.0])
       assert_array_almost_equal(u_max, [10.0, 5.0, 2.0])
@@ -380,7 +391,8 @@ class TestCentralMPCAgentEdgeCases:
 
    def test_horizon_one(self):
       """Test agent with horizon=1."""
-      agent = CentralMPCAgent(dt=0.1, horizon=1)
+      physics = LinearKinematicsPhysics(dt=0.1)
+      agent = CentralMPCAgent(dt=0.1, physics=physics, horizon=1)
       x0 = np.zeros(6)
       p_ref = np.array([5.0, 5.0, 5.0])
 
@@ -391,15 +403,17 @@ class TestCentralMPCAgentEdgeCases:
       assert cost >= 0
 
    def test_asymmetric_bounds(self):
-      """Test agent with asymmetric control bounds."""
-      agent = CentralMPCAgent(dt=0.1, u_min=[-1.0, -2.0, -3.0], u_max=[4.0, 5.0, 6.0])
+      """Test agent with asymmetric control bounds from physics."""
+      physics = LinearKinematicsPhysics(dt=0.1, u_min=[-1.0, -2.0, -3.0], u_max=[4.0, 5.0, 6.0])
+      agent = CentralMPCAgent(dt=0.1, physics=physics)
       u_min, u_max = agent.central_bounds()
       assert_array_almost_equal(u_min, [-1.0, -2.0, -3.0])
       assert_array_almost_equal(u_max, [4.0, 5.0, 6.0])
 
    def test_zero_weights(self):
       """Test agent with zero position weights (only penalizes velocity and control)."""
-      agent = CentralMPCAgent(dt=0.1, q_pos=[0.0, 0.0, 0.0], q_vel=[1.0, 1.0, 1.0])
+      physics = LinearKinematicsPhysics(dt=0.1)
+      agent = CentralMPCAgent(dt=0.1, physics=physics, q_pos=[0.0, 0.0, 0.0], q_vel=[1.0, 1.0, 1.0])
       x0 = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
       p_ref = np.array([100.0, 100.0, 100.0])
 
@@ -412,7 +426,8 @@ class TestCentralMPCAgentEdgeCases:
 
    def test_large_horizon(self):
       """Test agent with large horizon."""
-      agent = CentralMPCAgent(dt=0.1, horizon=100)
+      physics = LinearKinematicsPhysics(dt=0.1)
+      agent = CentralMPCAgent(dt=0.1, physics=physics, horizon=100)
       x0 = np.zeros(6)
       p_ref = np.array([5.0, 5.0, 5.0])
 
@@ -424,7 +439,8 @@ class TestCentralMPCAgentEdgeCases:
 
    def test_negative_target(self):
       """Test agent with negative target coordinates."""
-      agent = CentralMPCAgent(dt=0.1, horizon=5)
+      physics = LinearKinematicsPhysics(dt=0.1)
+      agent = CentralMPCAgent(dt=0.1, physics=physics, horizon=5)
       x0 = np.zeros(6)
       p_ref = np.array([-10.0, -10.0, -10.0])
 

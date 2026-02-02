@@ -1,16 +1,22 @@
 {
   "dt": 0.1,
   "room": {"min": [-2.5, -2.5, -2.5], "max": [2.5, 2.5, 2.5]},
-  "physics": {"type": "linear_kinematics", "params": {}},
+  "physics": [
+    {
+      "id": "standard",
+      "type": "linear_kinematics",
+      "params": {
+        "v_max": 2.5,
+        "u_min": [-3.0, -3.0, -3.0],
+        "u_max": [3.0, 3.0, 3.0]
+      }
+    }
+  ],
 
   "controller": {
     "type": "mpc_agent",
     "params": {
-      "horizon": 5,
-      "q_pos": [3.0, 3.0, 3.0],
-      "r_u": [0.1, 0.1, 0.1],
-      "u_min": [-3.0, -3.0, -3.0],
-      "u_max": [3.0, 3.0, 3.0]
+      "horizon": 5
     }
   },
 
@@ -25,6 +31,7 @@
   "drones": [
     {
       "drone_id": "drone-1",
+      "physics": "standard",
       "start": [0.0, -2.0, 0.0],
       "target": [0.0, 2.0, 0.0],
       "radius": 0.2,
@@ -34,6 +41,7 @@
     },
     {
       "drone_id": "drone-2",
+      "physics": "standard",
       "start": [0.0, 2.0, 0.0],
       "target": [0.0, -2.0, 0.0],
       "radius": 0.2,

@@ -7,7 +7,7 @@ from typing import Any
 
 from drone_sim.domain.config import ScenarioConfig
 from drone_sim.simulation.simulator import Simulator
-from tools.live_view import load_parametrized_json
+from tools.utility.param_helper import load_parametrized_json
 
 
 def run_scenario(config_path: str | Path, *, steps: int = 50) -> None:

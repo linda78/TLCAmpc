@@ -73,7 +73,7 @@ def render(width: int = 900, height: int = 700, dpi: int = 120, elev: float = 20
                     drone_radii=[d.radius for d in _sim.drones], drone_safety_zones=safety_zones,
                     drone_colors=[d.color for d in _sim.drones], safety_colors=[d.safety_color for d in _sim.drones],
                     trace_colors=[d.trace_color for d in _sim.drones], drone_traces=traces, obstacles=_sim.obstacles,
-                    step_count=_sim.step_count, compute_time_s=_sim.compute_time_s, width=width, height=height, dpi=dpi,
-                    elev=elev, azim=azim)
+                    step_count=_sim.step_count, compute_time_s=_sim.compute_time_s, room_radius=_sim.room_radius,
+                    width=width, height=height, dpi=dpi, elev=elev, azim=azim)
 
    return Response(content=png, media_type="image/png")

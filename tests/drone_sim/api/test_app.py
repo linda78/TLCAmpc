@@ -52,6 +52,7 @@ class TestConfigEndpoint:
       """Test /config handles multiple drones."""
       valid_config["drones"].append({
             "drone_id": "d2",
+            "physics": "standard",
             "start": [10.0, 10.0, 5.0],
             "waypoints": [],
             "target": [0.0, 0.0, 5.0],
@@ -66,7 +67,7 @@ class TestConfigEndpoint:
 
    def test_config_invalid_physics_type_raises(self, client, valid_config):
       """Test /config raises error for invalid physics type."""
-      valid_config["physics"]["type"] = "nonexistent_physics"
+      valid_config["physics"][0]["type"] = "nonexistent_physics"
 
       # The ValueError from registry propagates as an unhandled exception
       # which causes the test client to raise the exception directly
@@ -96,6 +97,7 @@ class TestConfigEndpoint:
 
       valid_config["drones"].append({
          "drone_id": "d2",
+         "physics": "standard",
          "start": [5.0, 5.0, 5.0],
          "waypoints": [],
          "target": [0.0, 0.0, 5.0]
@@ -143,10 +145,10 @@ class TestStepEndpoint:
       """Test /step returns infeasible status when optimization fails."""
       infeasible_config = {
          "dt": 0.1,
-         "physics": {"type": "linear_kinematics", "params": {}},
+         "physics": [{"id": "standard", "type": "linear_kinematics", "params": {}}],
          "controller": {"type": "mpc_agent", "params": {"horizon": 5}},
          "coordinator": {"type": "mpc_central", "params": {"horizon": 5}},
-         "drones": [{"drone_id": "d1", "start": [-100.0, -100.0, -100.0], "target": [5.0, 5.0, 5.0]}],
+         "drones": [{"drone_id": "d1", "physics": "standard", "start": [-100.0, -100.0, -100.0], "target": [5.0, 5.0, 5.0]}],
          "room": {"min": [0.0, 0.0, 0.0], "max": [10.0, 10.0, 10.0]}
       }
 

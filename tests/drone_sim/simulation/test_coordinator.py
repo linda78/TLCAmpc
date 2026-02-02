@@ -16,6 +16,7 @@ from numpy.testing import assert_array_almost_equal
 
 from drone_sim.simulation.coordinator import (predict_external_const_vel, CentralMPCGlobalCoordinator)
 from drone_sim.controllers.central_cost import CentralMPCAgent
+from drone_sim.physics.linear_kinematics import LinearKinematicsPhysics
 
 
 class TestPredictExternalConstVel:
@@ -168,6 +169,7 @@ class TestCentralMPCGlobalCoordinatorConstraints:
       safety_by_id = {"d1": 1.0, "d2": 1.0}
       radii_by_id = {"d1": 0.2, "d2": 0.2}
       cons_stops_by_id = {"d1": 0.0, "d2": 0.0}
+      v_max_by_id = {"d1": 5.0, "d2": 5.0}
 
       g = sample_coordinator._constraints(
          u_flat,
@@ -176,6 +178,7 @@ class TestCentralMPCGlobalCoordinatorConstraints:
          safety_by_id=safety_by_id,
          radii_by_id=radii_by_id,
          cons_stops_by_id=cons_stops_by_id,
+         v_max_by_id=v_max_by_id,
          P_ext={},
          obstacles=[],
          room_min=None,
@@ -198,6 +201,7 @@ class TestCentralMPCGlobalCoordinatorConstraints:
       safety_by_id = {"d1": 1.0, "d2": 1.0}
       radii_by_id = {"d1": 0.2, "d2": 0.2}
       cons_stops_by_id = {"d1": 0.0, "d2": 0.0}
+      v_max_by_id = {"d1": 5.0, "d2": 5.0}
 
       g = sample_coordinator._constraints(
          u_flat,
@@ -206,6 +210,7 @@ class TestCentralMPCGlobalCoordinatorConstraints:
          safety_by_id=safety_by_id,
          radii_by_id=radii_by_id,
          cons_stops_by_id=cons_stops_by_id,
+         v_max_by_id=v_max_by_id,
          P_ext={},
          obstacles=[],
          room_min=None,
@@ -227,6 +232,7 @@ class TestCentralMPCGlobalCoordinatorConstraints:
       safety_by_id = {"d1": 1.0, "d2": 1.0}
       radii_by_id = {"d1": 0.2, "d2": 0.2}
       cons_stops_by_id = {"d1": 0.0, "d2": 0.0}
+      v_max_by_id = {"d1": 5.0, "d2": 5.0}
 
       g = sample_coordinator._constraints(
          u_flat,
@@ -235,6 +241,7 @@ class TestCentralMPCGlobalCoordinatorConstraints:
          safety_by_id=safety_by_id,
          radii_by_id=radii_by_id,
          cons_stops_by_id=cons_stops_by_id,
+         v_max_by_id=v_max_by_id,
          P_ext={},
          obstacles=[],
          room_min=None,
@@ -253,6 +260,7 @@ class TestCentralMPCGlobalCoordinatorConstraints:
       safety_by_id = {"d1": 1.0}
       radii_by_id = {"d1": 0.2}
       cons_stops_by_id = {"d1": 0.0}
+      v_max_by_id = {"d1": 5.0}
       obstacles = [(np.array([0.5, 0.0, 0.0]), 0.2)]
 
       g = sample_coordinator._constraints(
@@ -262,6 +270,7 @@ class TestCentralMPCGlobalCoordinatorConstraints:
          safety_by_id=safety_by_id,
          radii_by_id=radii_by_id,
          cons_stops_by_id=cons_stops_by_id,
+         v_max_by_id=v_max_by_id,
          P_ext={},
          obstacles=obstacles,
          room_min=None,
@@ -280,6 +289,7 @@ class TestCentralMPCGlobalCoordinatorConstraints:
       safety_by_id = {"d1": 1.0}
       radii_by_id = {"d1": 0.2}
       cons_stops_by_id = {"d1": 0.0}
+      v_max_by_id = {"d1": 5.0}
       room_min = np.array([0.0, 0.0, 0.0])
       room_max = np.array([10.0, 10.0, 10.0])
 
@@ -290,6 +300,7 @@ class TestCentralMPCGlobalCoordinatorConstraints:
          safety_by_id=safety_by_id,
          radii_by_id=radii_by_id,
          cons_stops_by_id=cons_stops_by_id,
+         v_max_by_id=v_max_by_id,
          P_ext={},
          obstacles=[],
          room_min=room_min,
@@ -304,8 +315,9 @@ class TestCentralMPCGlobalCoordinatorSolveControls:
 
    def test_solve_controls_multiple_drones(self, sample_coordinator: CentralMPCGlobalCoordinator):
       """Test solve_controls with multiple drones."""
-      controller1 = CentralMPCAgent(dt=sample_coordinator.dt, horizon=sample_coordinator.horizon)
-      controller2 = CentralMPCAgent(dt=sample_coordinator.dt, horizon=sample_coordinator.horizon)
+      physics = LinearKinematicsPhysics(dt=sample_coordinator.dt)
+      controller1 = CentralMPCAgent(dt=sample_coordinator.dt, physics=physics, horizon=sample_coordinator.horizon)
+      controller2 = CentralMPCAgent(dt=sample_coordinator.dt, physics=physics, horizon=sample_coordinator.horizon)
 
       result = sample_coordinator.solve_controls(
          drone_ids=["d1", "d2"],
@@ -317,6 +329,9 @@ class TestCentralMPCGlobalCoordinatorSolveControls:
          radii=[0.2, 0.2],
          safety_zones=[1.0, 1.0],
          cons_stops=[0.0, 0.0],
+         v_maxs=[5.0, 5.0],
+         u_mins=[(-3.0, -3.0, -3.0), (-3.0, -3.0, -3.0)],
+         u_maxs=[(3.0, 3.0, 3.0), (3.0, 3.0, 3.0)],
          controllers=[controller1, controller2],
          obstacles=[],
          room_min=np.array([-10.0, -10.0, 0.0]),
@@ -330,7 +345,8 @@ class TestCentralMPCGlobalCoordinatorSolveControls:
 
    def test_solve_controls_raises_on_infeasible(self, sample_coordinator: CentralMPCGlobalCoordinator):
       """Test solve_controls raises RuntimeError when optimization is infeasible."""
-      controller = CentralMPCAgent(dt=sample_coordinator.dt, horizon=sample_coordinator.horizon)
+      physics = LinearKinematicsPhysics(dt=sample_coordinator.dt)
+      controller = CentralMPCAgent(dt=sample_coordinator.dt, physics=physics, horizon=sample_coordinator.horizon)
 
       with pytest.raises(RuntimeError, match="optimization failed|infeasible"):
          sample_coordinator.solve_controls(
@@ -340,6 +356,9 @@ class TestCentralMPCGlobalCoordinatorSolveControls:
             radii=[0.2],
             safety_zones=[1.0],
             cons_stops=[0.0],
+            v_maxs=[5.0],
+            u_mins=[(-3.0, -3.0, -3.0)],
+            u_maxs=[(3.0, 3.0, 3.0)],
             controllers=[controller],
             obstacles=[],
             room_min=np.array([0.0, 0.0, 0.0]),
@@ -348,12 +367,8 @@ class TestCentralMPCGlobalCoordinatorSolveControls:
 
    def test_solve_controls_respects_bounds(self, sample_coordinator: CentralMPCGlobalCoordinator):
       """Test solve_controls produces controls within bounds."""
-      controller = CentralMPCAgent(
-         dt=sample_coordinator.dt,
-         horizon=sample_coordinator.horizon,
-         u_min=[-2.0, -2.0, -2.0],
-         u_max=[2.0, 2.0, 2.0]
-      )
+      physics = LinearKinematicsPhysics(dt=sample_coordinator.dt, u_min=[-2.0, -2.0, -2.0], u_max=[2.0, 2.0, 2.0])
+      controller = CentralMPCAgent(dt=sample_coordinator.dt, physics=physics, horizon=sample_coordinator.horizon)
 
       result = sample_coordinator.solve_controls(
          drone_ids=["d1"],
@@ -362,6 +377,9 @@ class TestCentralMPCGlobalCoordinatorSolveControls:
          radii=[0.2],
          safety_zones=[1.0],
          cons_stops=[0.0],
+         v_maxs=[5.0],
+         u_mins=[(-2.0, -2.0, -2.0)],
+         u_maxs=[(2.0, 2.0, 2.0)],
          controllers=[controller],
          obstacles=[],
          room_min=np.array([-200.0, -200.0, 0.0]),
@@ -442,8 +460,9 @@ class TestCentralMPCGlobalCoordinatorObservers:
       room_min = np.array([0.0, 0.0, 0.0])
       room_max = np.array([10.0, 10.0, 10.0])
       vals: list[float] = []
+      xs0 = np.array([[5.0, 5.0, 5.0, 0.0, 0.0, 0.0]])  # Current state: position (5,5,5), zero velocity
 
-      sample_coordinator.observe_no_flying_zone(M, P_opt, opt_ids, safety_by_id, room_max, room_min, vals)
+      sample_coordinator.observe_no_flying_zone(M, P_opt, opt_ids, safety_by_id, room_max, room_min, vals, xs0)
 
       # Should have H * M * 6 constraints (6 walls per drone per timestep)
       assert len(vals) == H * M * 6
@@ -457,7 +476,8 @@ class TestCentralMPCGlobalCoordinatorEdgeCases:
    def test_single_drone_no_collision_constraints(self):
       """Test coordinator with single drone has no drone-drone constraints."""
       coord = CentralMPCGlobalCoordinator(dt=0.1, horizon=3)
-      controller = CentralMPCAgent(dt=0.1, horizon=3)
+      physics = LinearKinematicsPhysics(dt=0.1)
+      controller = CentralMPCAgent(dt=0.1, physics=physics, horizon=3)
 
       result = coord.solve_controls(
          drone_ids=["d1"],
@@ -466,6 +486,9 @@ class TestCentralMPCGlobalCoordinatorEdgeCases:
          radii=[0.2],
          safety_zones=[1.0],
          cons_stops=[0.0],
+         v_maxs=[5.0],
+         u_mins=[(-3.0, -3.0, -3.0)],
+         u_maxs=[(3.0, 3.0, 3.0)],
          controllers=[controller],
          obstacles=[],
          room_min=np.array([-10.0, -10.0, 0.0]),
@@ -477,7 +500,8 @@ class TestCentralMPCGlobalCoordinatorEdgeCases:
    def test_horizon_one(self):
       """Test coordinator with horizon=1."""
       coord = CentralMPCGlobalCoordinator(dt=0.1, horizon=1)
-      controller = CentralMPCAgent(dt=0.1, horizon=1)
+      physics = LinearKinematicsPhysics(dt=0.1)
+      controller = CentralMPCAgent(dt=0.1, physics=physics, horizon=1)
 
       result = coord.solve_controls(
          drone_ids=["d1"],
@@ -486,6 +510,9 @@ class TestCentralMPCGlobalCoordinatorEdgeCases:
          radii=[0.2],
          safety_zones=[1.0],
          cons_stops=[0.0],
+         v_maxs=[5.0],
+         u_mins=[(-3.0, -3.0, -3.0)],
+         u_maxs=[(3.0, 3.0, 3.0)],
          controllers=[controller],
          obstacles=[],
          room_min=np.array([-10.0, -10.0, 0.0]),

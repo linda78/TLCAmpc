@@ -13,7 +13,7 @@ import pytest
 import numpy as np
 from numpy.testing import assert_array_almost_equal
 
-from drone_sim.domain.config import (ControllerSpec, DroneConfig, ObstacleConfig, PhysicsSpec, RoomConfig, ScenarioConfig)
+from drone_sim.domain.config import (ControllerSpec, DroneConfig, ObstacleConfig, PhysicsConfig, RoomConfig, ScenarioConfig)
 from drone_sim.simulation.simulator import Simulator
 
 
@@ -58,9 +58,10 @@ class TestSimulatorFromConfig:
          assert drone.route is not None
          expected_target = np.array(sample_scenario_config.drones[i].target)
          assert_array_almost_equal(drone.route.target, expected_target)
-      # physics
-      assert sim.physics is not None
-      assert hasattr(sim.physics, "step")
+      # Each drone has its own physics (kinematics)
+      for drone in sim.drones:
+         assert drone.kinematics is not None
+         assert hasattr(drone.kinematics, "step")
       # coordinator
       assert sim.coordinator is not None
 
@@ -68,10 +69,10 @@ class TestSimulatorFromConfig:
       """Test from_config initializes obstacles from config."""
       cfg = ScenarioConfig(
          dt=0.1,
-         physics=PhysicsSpec(type="linear_kinematics"),
+         physics=[PhysicsConfig(id="standard", type="linear_kinematics")],
          controller=ControllerSpec(type="mpc_agent"),
          coordinator=ControllerSpec(type="mpc_central"),
-         drones=[DroneConfig(drone_id="d1", start=[0, 0, 0], target=[5, 5, 5])],
+         drones=[DroneConfig(drone_id="d1", physics="standard", start=[0, 0, 0], target=[5, 5, 5])],
          obstacles=[
             ObstacleConfig(center=[2.5, 2.5, 2.5], radius=0.5),
             ObstacleConfig(center=[1.0, 1.0, 1.0], radius=0.3)
@@ -89,12 +90,12 @@ class TestSimulatorFromConfig:
       """Test from_config derives room bounds when not specified."""
       cfg = ScenarioConfig(
          dt=0.1,
-         physics=PhysicsSpec(type="linear_kinematics"),
+         physics=[PhysicsConfig(id="standard", type="linear_kinematics")],
          controller=ControllerSpec(type="mpc_agent"),
          coordinator=ControllerSpec(type="mpc_central"),
          drones=[
-            DroneConfig(drone_id="d1", start=[0, 0, 0], target=[10, 10, 10]),
-            DroneConfig(drone_id="d2", start=[5, 5, 5], target=[-5, -5, 5])
+            DroneConfig(drone_id="d1", physics="standard", start=[0, 0, 0], target=[10, 10, 10]),
+            DroneConfig(drone_id="d2", physics="standard", start=[5, 5, 5], target=[-5, -5, 5])
          ],
          room=None
       )
@@ -156,10 +157,10 @@ class TestSimulatorStep:
       """Test step advances waypoints when reached."""
       cfg = ScenarioConfig(
          dt=0.1,
-         physics=PhysicsSpec(type="linear_kinematics"),
+         physics=[PhysicsConfig(id="standard", type="linear_kinematics")],
          controller=ControllerSpec(type="mpc_agent"),
          coordinator=ControllerSpec(type="mpc_central"),
-         drones=[DroneConfig(drone_id="d1", start=[0, 0, 5], waypoints=[[0.01, 0.01, 5.01]], target=[5, 5, 5])],
+         drones=[DroneConfig(drone_id="d1", physics="standard", start=[0, 0, 5], waypoints=[[0.01, 0.01, 5.01]], target=[5, 5, 5])],
          room=RoomConfig(min=[-10, -10, 0], max=[10, 10, 10])
       )
 
@@ -175,10 +176,10 @@ class TestSimulatorStep:
       """Test step clamps drone positions to room bounds."""
       cfg = ScenarioConfig(
          dt=0.1,
-         physics=PhysicsSpec(type="linear_kinematics"),
+         physics=[PhysicsConfig(id="standard", type="linear_kinematics")],
          controller=ControllerSpec(type="mpc_agent"),
          coordinator=ControllerSpec(type="mpc_central"),
-         drones=[DroneConfig(drone_id="d1", start=[9.5, 0, 5], target=[100, 0, 5], radius=0.2)],
+         drones=[DroneConfig(drone_id="d1", physics="standard", start=[9.5, 0, 5], target=[100, 0, 5], radius=0.2)],
          room=RoomConfig(min=[-10, -10, 0], max=[10, 10, 10])
       )
 
@@ -195,10 +196,10 @@ class TestSimulatorStep:
       """Test step raises RuntimeError when coordinator is None."""
       cfg = ScenarioConfig(
          dt=0.1,
-         physics=PhysicsSpec(type="linear_kinematics"),
+         physics=[PhysicsConfig(id="standard", type="linear_kinematics")],
          controller=ControllerSpec(type="mpc_agent"),
          coordinator=None,
-         drones=[DroneConfig(drone_id="d1", start=[0, 0, 5], target=[5, 5, 5])],
+         drones=[DroneConfig(drone_id="d1", physics="standard", start=[0, 0, 5], target=[5, 5, 5])],
          room=RoomConfig(min=[-10, -10, 0], max=[10, 10, 10])
       )
 
@@ -211,10 +212,10 @@ class TestSimulatorStep:
       """Test step sets infeasible flag when optimization fails."""
       cfg = ScenarioConfig(
          dt=0.1,
-         physics=PhysicsSpec(type="linear_kinematics"),
+         physics=[PhysicsConfig(id="standard", type="linear_kinematics")],
          controller=ControllerSpec(type="mpc_agent"),
          coordinator=ControllerSpec(type="mpc_central"),
-         drones=[DroneConfig(drone_id="d1", start=[-50, -50, -50], target=[5, 5, 5])],
+         drones=[DroneConfig(drone_id="d1", physics="standard", start=[-50, -50, -50], target=[5, 5, 5])],
          room=RoomConfig(min=[0, 0, 0], max=[10, 10, 10])
       )
 
@@ -261,10 +262,10 @@ class TestSimulatorComputeCollisions:
       """Test _compute_collisions detects drone-obstacle collision."""
       cfg = ScenarioConfig(
          dt=0.1,
-         physics=PhysicsSpec(type="linear_kinematics"),
+         physics=[PhysicsConfig(id="standard", type="linear_kinematics")],
          controller=ControllerSpec(type="mpc_agent"),
          coordinator=ControllerSpec(type="mpc_central"),
-         drones=[DroneConfig(drone_id="d1", start=[0, 0, 5], target=[5, 5, 5])],
+         drones=[DroneConfig(drone_id="d1", physics="standard", start=[0, 0, 5], target=[5, 5, 5])],
          obstacles=[ObstacleConfig(center=[0.5, 0, 5], radius=0.3)],
          room=RoomConfig(min=[-10, -10, 0], max=[10, 10, 10])
       )
@@ -327,10 +328,10 @@ class TestSimulatorToDict:
       """Test to_dict obstacles have correct format."""
       cfg = ScenarioConfig(
          dt=0.1,
-         physics=PhysicsSpec(type="linear_kinematics"),
+         physics=[PhysicsConfig(id="standard", type="linear_kinematics")],
          controller=ControllerSpec(type="mpc_agent"),
          coordinator=ControllerSpec(type="mpc_central"),
-         drones=[DroneConfig(drone_id="d1", start=[0, 0, 5], target=[5, 5, 5])],
+         drones=[DroneConfig(drone_id="d1", physics="standard", start=[0, 0, 5], target=[5, 5, 5])],
          obstacles=[ObstacleConfig(center=[2.5, 2.5, 2.5], radius=0.5)],
          room=RoomConfig(min=[-10, -10, 0], max=[10, 10, 10])
       )
@@ -368,10 +369,10 @@ class TestSimulatorEdgeCases:
       """Test trace length is limited to trace_len."""
       cfg = ScenarioConfig(
          dt=0.1,
-         physics=PhysicsSpec(type="linear_kinematics"),
+         physics=[PhysicsConfig(id="standard", type="linear_kinematics")],
          controller=ControllerSpec(type="mpc_agent"),
          coordinator=ControllerSpec(type="mpc_central"),
-         drones=[DroneConfig(drone_id="d1", start=[0, 0, 5], target=[5, 5, 5])],
+         drones=[DroneConfig(drone_id="d1", physics="standard", start=[0, 0, 5], target=[5, 5, 5])],
          room=RoomConfig(min=[-10, -10, 0], max=[10, 10, 10])
       )
 
@@ -387,10 +388,10 @@ class TestSimulatorEdgeCases:
       """Test velocity component is zeroed when hitting wall."""
       cfg = ScenarioConfig(
          dt=0.1,
-         physics=PhysicsSpec(type="linear_kinematics"),
+         physics=[PhysicsConfig(id="standard", type="linear_kinematics")],
          controller=ControllerSpec(type="mpc_agent"),
          coordinator=ControllerSpec(type="mpc_central"),
-         drones=[DroneConfig(drone_id="d1", start=[9.5, 5, 5], target=[20, 5, 5], radius=0.2)],
+         drones=[DroneConfig(drone_id="d1", physics="standard", start=[9.5, 5, 5], target=[20, 5, 5], radius=0.2)],
          room=RoomConfig(min=[0, 0, 0], max=[10, 10, 10])
       )
 

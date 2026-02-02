@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from drone_sim.api import app as app_module
 from drone_sim.api.app import app
 from drone_sim.controllers.central_cost import CentralMPCAgent
-from drone_sim.domain.config import (DroneConfig, ScenarioConfig, PhysicsSpec, ControllerSpec, ObstacleConfig, RoomConfig)
+from drone_sim.domain.config import (DroneConfig, ScenarioConfig, PhysicsConfig, ControllerSpec, ObstacleConfig, RoomConfig)
 from drone_sim.domain.drone import Drone, Route
 from drone_sim.physics.linear_kinematics import LinearKinematicsPhysics
 from drone_sim.simulation.coordinator import CentralMPCGlobalCoordinator
@@ -29,12 +29,13 @@ def valid_config():
    """Return a valid scenario configuration dict."""
    return {
       "dt": 0.1,
-      "physics": {"type": "linear_kinematics", "params": {}},
+      "physics": [{"id": "standard", "type": "linear_kinematics", "params": {}}],
       "controller": {"type": "mpc_agent", "params": {"horizon": 5}},
       "coordinator": {"type": "mpc_central", "params": {"horizon": 5}},
       "drones": [
          {
             "drone_id": "d1",
+            "physics": "standard",
             "start": [0.0, 0.0, 5.0],
             "waypoints": [],
             "target": [5.0, 5.0, 5.0],
@@ -91,9 +92,9 @@ def sample_dt() -> float:
 
 
 @pytest.fixture
-def sample_controller(sample_dt: float) -> CentralMPCAgent:
+def sample_controller(sample_dt: float, sample_physics: LinearKinematicsPhysics) -> CentralMPCAgent:
    """Return an initialized CentralMPCAgent instance."""
-   return CentralMPCAgent(dt=sample_dt, horizon=5)
+   return CentralMPCAgent(dt=sample_dt, physics=sample_physics, horizon=5)
 
 
 @pytest.fixture
@@ -123,7 +124,7 @@ def sample_route_no_waypoints() -> Route:
 
 
 @pytest.fixture
-def sample_drone(sample_controller: CentralMPCAgent, sample_route: Route) -> Drone:
+def sample_drone(sample_controller: CentralMPCAgent, sample_route: Route, sample_physics: LinearKinematicsPhysics) -> Drone:
    """Return a sample Drone instance."""
    return Drone(
       drone_id="drone-1",
@@ -135,7 +136,8 @@ def sample_drone(sample_controller: CentralMPCAgent, sample_route: Route) -> Dro
       trace_color="tab:blue",
       controller=sample_controller,
       x=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=float),
-      route=sample_route
+      route=sample_route,
+      kinematics=sample_physics
    )
 
 
@@ -144,6 +146,7 @@ def sample_drone_config() -> DroneConfig:
    """Return a valid DroneConfig for testing."""
    return DroneConfig(
       drone_id="test-drone-1",
+      physics="standard",
       start=[0.0, 0.0, 5.0],
       waypoints=[[1.0, 1.0, 5.0], [2.0, 2.0, 5.0]],
       target=[5.0, 5.0, 5.0],
@@ -154,10 +157,9 @@ def sample_drone_config() -> DroneConfig:
 
 
 @pytest.fixture
-def sample_physics_spec() -> PhysicsSpec:
-   """Return a valid PhysicsSpec."""
-   return PhysicsSpec(type="linear_kinematics", params={})
-
+def sample_physics_config() -> PhysicsConfig:
+   """Return a valid PhysicsConfig."""
+   return PhysicsConfig(id="standard", type="linear_kinematics", params={})
 
 @pytest.fixture
 def sample_controller_spec() -> ControllerSpec:
@@ -186,7 +188,7 @@ def sample_room_config() -> RoomConfig:
 @pytest.fixture
 def sample_scenario_config(
       sample_drone_config: DroneConfig,
-      sample_physics_spec: PhysicsSpec,
+      sample_physics_config: PhysicsConfig,
       sample_controller_spec: ControllerSpec,
       sample_coordinator_spec: ControllerSpec,
       sample_room_config: RoomConfig
@@ -194,6 +196,7 @@ def sample_scenario_config(
    """Return a complete ScenarioConfig for testing."""
    drone2 = DroneConfig(
       drone_id="test-drone-2",
+      physics="standard",
       start=[8.0, 8.0, 5.0],
       waypoints=[],
       target=[6.0, 6.0, 5.0],
@@ -203,7 +206,7 @@ def sample_scenario_config(
    )
    return ScenarioConfig(
       dt=0.1,
-      physics=sample_physics_spec,
+      physics=[sample_physics_config],
       controller=sample_controller_spec,
       coordinator=sample_coordinator_spec,
       drones=[sample_drone_config, drone2],
@@ -215,7 +218,7 @@ def sample_scenario_config(
 @pytest.fixture
 def sample_scenario_config_single_drone(
       sample_drone_config: DroneConfig,
-      sample_physics_spec: PhysicsSpec,
+      sample_physics_config: PhysicsConfig,
       sample_controller_spec: ControllerSpec,
       sample_coordinator_spec: ControllerSpec,
       sample_room_config: RoomConfig
@@ -223,7 +226,7 @@ def sample_scenario_config_single_drone(
    """Return a ScenarioConfig with a single drone."""
    return ScenarioConfig(
       dt=0.1,
-      physics=sample_physics_spec,
+      physics=[sample_physics_config],
       controller=sample_controller_spec,
       coordinator=sample_coordinator_spec,
       drones=[sample_drone_config],

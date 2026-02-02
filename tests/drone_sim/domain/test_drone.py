@@ -13,6 +13,7 @@ from numpy.testing import assert_array_almost_equal, assert_array_equal
 
 from drone_sim.domain.drone import Drone, Route
 from drone_sim.controllers.central_cost import CentralMPCAgent
+from drone_sim.physics.linear_kinematics import LinearKinematicsPhysics
 
 
 class TestRoute:
@@ -193,7 +194,7 @@ class TestDrone:
       reconstructed = np.concatenate([pos, vel])
       assert_array_equal(reconstructed, sample_drone.x)
 
-   def test_drone_edge_case_large_values(self, sample_controller: CentralMPCAgent, sample_route: Route):
+   def test_drone_edge_case_large_values(self, sample_controller: CentralMPCAgent, sample_route: Route, sample_physics: LinearKinematicsPhysics):
       """Test Drone with large coordinate values."""
       drone = Drone(
          drone_id="large-drone",
@@ -205,12 +206,13 @@ class TestDrone:
          trace_color="blue",
          controller=sample_controller,
          x=np.array([1e6, 1e6, 1e6, 1e3, 1e3, 1e3], dtype=float),
-         route=sample_route
+         route=sample_route,
+         kinematics=sample_physics
       )
       assert drone.position()[0] == 1e6
       assert drone.velocity()[0] == 1e3
 
-   def test_drone_edge_case_negative_values(self, sample_controller: CentralMPCAgent, sample_route: Route):
+   def test_drone_edge_case_negative_values(self, sample_controller: CentralMPCAgent, sample_route: Route, sample_physics: LinearKinematicsPhysics):
       """Test Drone with negative coordinate values."""
       drone = Drone(
          drone_id="negative-drone",
@@ -222,7 +224,8 @@ class TestDrone:
          trace_color="blue",
          controller=sample_controller,
          x=np.array([-10.0, -20.0, -5.0, -1.0, -2.0, -0.5], dtype=float),
-         route=sample_route
+         route=sample_route,
+         kinematics=sample_physics
       )
       assert_array_almost_equal(drone.position(), np.array([-10.0, -20.0, -5.0]))
       assert_array_almost_equal(drone.velocity(), np.array([-1.0, -2.0, -0.5]))

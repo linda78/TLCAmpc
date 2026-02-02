@@ -43,25 +43,21 @@ class CentralMPCAgent(Controller):
    """
 
    dt: float
-   horizon: int = 12
+   physics: LinearKinematicsPhysics
+   horizon: int = 5
 
-   q_pos: list[float] = (8.0, 8.0, 8.0)
-   q_vel: list[float] = (0.5, 0.5, 0.5)
-   r_u: list[float] = (0.2, 0.2, 0.2)
-
-   u_min: list[float] = (-3.0, -3.0, -3.0)
-   u_max: list[float] = (3.0, 3.0, 3.0)
+   # TODO explain in README ... see J = Σ [ q_pos * ||position - target||² + q_vel * ||velocity||² + r_u * ||u||² ]
+   q_pos: list[float] = (1.0, 1.0, 1.0) # Penalizes deviation from the target position high value -> try to go fast to the goal, small -> its o.k. to make detours
+   q_vel: list[float] = (1.0, 1.0, 1.0) # Penalizes non-zero velocity. Stabilize if drone is close to the end.
+   r_u: list[float] = (1.0, 1.0, 1.0) # small values to allow for more acceleration
 
    def __post_init__(self) -> None:
-      self._phys = LinearKinematicsPhysics(dt=self.dt)
       self._Qp = as_diagonal(self.q_pos)
       self._Qv = as_diagonal(self.q_vel)
       self._R = as_diagonal(self.r_u)
-      self._u_min = np.asarray(self.u_min, dtype=float)
-      self._u_max = np.asarray(self.u_max, dtype=float)
 
    def central_bounds(self) -> tuple[np.ndarray, np.ndarray]:
-      return self._u_min.copy(), self._u_max.copy()
+      return self.physics.u_min.copy(), self.physics.u_max.copy()
 
    def central_initial_guess(self, x0: np.ndarray, p_ref: np.ndarray) -> np.ndarray:
       x0 = np.asarray(x0, dtype=float).reshape(6)
@@ -70,13 +66,12 @@ class CentralMPCAgent(Controller):
       p = x0[:3]
       v = x0[3:]
       a = (p_ref - p) - 0.5 * v
-      a = np.clip(a, self._u_min, self._u_max)
+      a = np.clip(a, self.physics.u_min, self.physics.u_max)
       return np.tile(a.reshape(1, 3), (self.horizon, 1))
 
    def central_cost(self, u_seq: np.ndarray, x0: np.ndarray, p_ref: np.ndarray) -> float:
-      # Allow the coordinator to choose the horizon length.
       u_seq = np.asarray(u_seq, dtype=float).reshape((-1, 3))
-      u_seq = np.clip(u_seq, self._u_min, self._u_max)
+      u_seq = np.clip(u_seq, self.physics.u_min, self.physics.u_max)
 
       x = np.asarray(x0, dtype=float).reshape(6)
       p_ref = np.asarray(p_ref, dtype=float).reshape(3)
@@ -84,7 +79,7 @@ class CentralMPCAgent(Controller):
       total = 0.0
       for k in range(u_seq.shape[0]):
          u = u_seq[k]
-         x = self._phys.A @ x + self._phys.B @ u
+         x = self.physics.step(x, u)
          e = x[:3] - p_ref
          v = x[3:]
          total += float(e @ self._Qp @ e + v @ self._Qv @ v + u @ self._R @ u)
@@ -95,4 +90,4 @@ class CentralMPCAgent(Controller):
    def control(self, x: np.ndarray, p_ref: np.ndarray, neighbors: list[tuple[np.ndarray, np.ndarray, float, float, np.ndarray]],
                obstacles: list[tuple[np.ndarray, float]], *, self_radius: float, self_safety_zone: float) -> np.ndarray:
       u0 = self.central_initial_guess(x, p_ref)[0]
-      return np.clip(u0, self._u_min, self._u_max)
+      return np.clip(u0, self.physics.u_min, self.physics.u_max)

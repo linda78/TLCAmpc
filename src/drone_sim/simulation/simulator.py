@@ -8,6 +8,7 @@ import numpy as np
 from drone_sim.domain.config import ColorValue, ScenarioConfig
 from drone_sim.domain.drone import Drone, Route
 from drone_sim.domain.registry import create_controller, create_coordinator, create_physics
+from drone_sim.physics.linear_kinematics import LinearKinematicsPhysics
 
 
 def _normalize_color(c: ColorValue) -> str | tuple[float, float, float]:
@@ -30,11 +31,15 @@ def _color_to_json(c: str | tuple[float, float, float]) -> str | list[float]:
 @dataclass
 class Simulator:
    dt: float
-   physics: object
    drones: list[Drone]
    obstacles: list[tuple[np.ndarray, float]]
+
+   # Room geometry: either rectangular (room_min/room_max) or spherical (room_radius).
+   # For rectangular rooms: room_min and room_max define axis-aligned bounds.
+   # For spherical rooms: room_radius is set and room_min/room_max are derived bounds for visualization.
    room_min: np.ndarray
    room_max: np.ndarray
+   room_radius: float | None = None  # If set, room is spherical with center at origin
 
    # Optional central coordination (e.g. centralized MPC over a subset of drones).
    coordinator: object | None = None
@@ -66,37 +71,50 @@ class Simulator:
       from drone_sim.physics import linear_kinematics as _  # noqa: F401
       from drone_sim.simulation import coordinator as _coord  # noqa: F401
 
-      physics = create_physics({"type": cfg.physics.type, "params": {"dt": cfg.dt, **cfg.physics.params}})
+      # Build physics models lookup by ID (each drone references its physics by ID)
+      physics_by_id: dict[str, LinearKinematicsPhysics] = {}
+      for phys_cfg in cfg.physics:
+         physics_by_id[phys_cfg.id] = create_physics({"type": phys_cfg.type, "params": {"dt": cfg.dt, **phys_cfg.params}})
 
       drones: list[Drone] = []
 
       coordinator = None
       if cfg.coordinator is not None:
-         coordinator = create_coordinator(
-               {"type": cfg.coordinator.type, "params": {"dt": cfg.dt, **cfg.coordinator.params}})
+         coordinator = create_coordinator({"type": cfg.coordinator.type, "params": {"dt": cfg.dt, **cfg.coordinator.params}})
 
       for drone_cfg in cfg.drones:
+         # Look up physics by ID from drone config first (needed for controller)
+         drone_kinematics = physics_by_id[drone_cfg.physics]
+
          spec = drone_cfg.controller or cfg.controller
-         controller = create_controller({"type": spec.type, "params": {"dt": cfg.dt, **spec.params}})
+         controller = create_controller({"type": spec.type, "params": {"dt": cfg.dt, "physics": drone_kinematics, **spec.params}})
          start = np.asarray(drone_cfg.start, dtype=float)
          x0 = np.zeros(6, dtype=float)
          x0[:3] = start
 
-         route = Route(waypoints=[np.asarray(w, dtype=float) for w in drone_cfg.waypoints],
-                       target=np.asarray(drone_cfg.target, dtype=float))
+         route = Route(waypoints=[np.asarray(w, dtype=float) for w in drone_cfg.waypoints], target=np.asarray(drone_cfg.target, dtype=float))
          drone_color = _normalize_color(drone_cfg.drone_color)
          safety_color = _normalize_color(drone_cfg.safety_color or drone_cfg.drone_color)
          trace_color = _normalize_color(drone_cfg.trace_color or drone_cfg.drone_color)
 
-         drones.append(Drone(drone_id=drone_cfg.drone_id, radius=drone_cfg.radius, safety_zone=drone_cfg.safety_zone,
-                             cons_stop=drone_cfg.cons_stop, v_max=drone_cfg.v_max, color=drone_color, safety_color=safety_color,
-                             trace_color=trace_color, controller=controller, x=x0, route=route))
+         drones.append(
+            Drone(drone_id=drone_cfg.drone_id, radius=drone_cfg.radius, safety_zone=drone_cfg.safety_zone, cons_stop=drone_cfg.cons_stop, color=drone_color,
+                  safety_color=safety_color, trace_color=trace_color, controller=controller, x=x0, route=route, kinematics=drone_kinematics))
 
       obstacles = [(np.asarray(o.center, dtype=float), float(o.radius)) for o in cfg.obstacles]
 
+      room_radius: float | None = None
       if cfg.room is not None:
-         room_min = np.asarray(cfg.room.min, dtype=float)
-         room_max = np.asarray(cfg.room.max, dtype=float)
+         if cfg.room.is_spherical():
+            # Spherical room: center at origin, radius from config
+            room_radius = float(cfg.room.r)
+            # Derive bounding box for visualization (cube containing the sphere)
+            room_min = np.array([-room_radius, -room_radius, -room_radius], dtype=float)
+            room_max = np.array([room_radius, room_radius, room_radius], dtype=float)
+         else:
+            # Rectangular room: use min/max from config
+            room_min = np.asarray(cfg.room.min, dtype=float)
+            room_max = np.asarray(cfg.room.max, dtype=float)
       else:
          # Derive a reasonable default room from scenario geometry.
          pts: list[np.ndarray] = []
@@ -119,7 +137,7 @@ class Simulator:
          room_min = p_min - margin
          room_max = p_max + margin
 
-      sim = cls(dt=cfg.dt, physics=physics, drones=drones, obstacles=obstacles, room_min=room_min, room_max=room_max, coordinator=coordinator)
+      sim = cls(dt=cfg.dt, drones=drones, obstacles=obstacles, room_min=room_min, room_max=room_max, room_radius=room_radius, coordinator=coordinator)
 
       # Initialize traces with the start positions.
       sim.traces = {d.drone_id: [d.position().copy()] for d in sim.drones}
@@ -180,34 +198,36 @@ class Simulator:
          # All Paper/"basic_paper" configs provide `coordinator: {"type": "mpc_central", ...}`.
          # If a scenario omits the coordinator, we fail fast instead of silently running a different control scheme.
          if self.coordinator is None:
-            raise RuntimeError(
-               "Simulator-step requires a coordinator (centralized MPC). Provide `coordinator` in ScenarioConfig.")
+            raise RuntimeError("Simulator-step requires a coordinator (centralized MPC). Provide `coordinator` in ScenarioConfig.")
 
          # First compute per-drone local controls (used for non-optimized drones, and as a fallback).
          for i, d in enumerate(self.drones):
-            neighbors = [(positions[j], velocities[j], self.drones[j].radius, self.drones[j].safety_zone, prefs[j],) for
-                         j in range(len(self.drones)) if j != i]
+            neighbors = [(positions[j], velocities[j], self.drones[j].radius, self.drones[j].safety_zone, prefs[j],) for j in range(len(self.drones)) if j != i]
 
             if hasattr(d.controller, "control"):
-               u = d.controller.control(d.x, prefs[i], neighbors, self.obstacles, self_radius=d.radius,
-                                        self_safety_zone=d.safety_zone)
+               u = d.controller.control(d.x, prefs[i], neighbors, self.obstacles, self_radius=d.radius, self_safety_zone=d.safety_zone)
             else:
                u = np.zeros(3, dtype=float)
             us.append(np.asarray(u, dtype=float).reshape(3))
 
          # Then override optimized drones with coordinator outputs.
-         all_drone_state = {d.drone_id: (positions[i], velocities[i], float(d.radius)) for i, d in
-                            enumerate(self.drones)}
+         all_drone_state = {d.drone_id: (positions[i], velocities[i], float(d.radius)) for i, d in enumerate(self.drones)}
+
+         # Build physics_by_id for heterogeneous physics support
+         physics_by_id = {d.drone_id: d.kinematics for d in self.drones}
 
          try:
             u_by_id = self.coordinator.solve_controls(drone_ids=[d.drone_id for d in self.drones], xs=[d.x for d in self.drones], prefs=prefs,
                                                       radii=[d.radius for d in self.drones], safety_zones=[d.safety_zone for d in self.drones],
                                                       cons_stops=[d.cons_stop for d in self.drones], v_maxs=[d.v_max for d in self.drones],
-                                                      controllers=[d.controller for d in self.drones],
-                                                      obstacles=self.obstacles, all_drone_state=all_drone_state, room_min=self.room_min, room_max=self.room_max)
+                                                      u_mins=[d.u_min for d in self.drones], u_maxs=[d.u_max for d in self.drones],
+                                                      controllers=[d.controller for d in self.drones], obstacles=self.obstacles,
+                                                      all_drone_state=all_drone_state, room_min=self.room_min, room_max=self.room_max,
+                                                      room_radius=self.room_radius, physics_by_id=physics_by_id)
 
          except RuntimeError as exc:
-            # Mark the step as infeasible (e.g. walls/obstacles make the optimization problem infeasible) and abort this step without advancing the simulation time.
+            # Mark the step as infeasible (e.g. walls/obstacles make the optimization problem infeasible) and abort this step without advancing the
+            # simulation time.
             self.infeasible = True
             self.infeasible_reason = str(exc)
             return
@@ -216,20 +236,40 @@ class Simulator:
             if d.drone_id in u_by_id:
                us[i] = np.asarray(u_by_id[d.drone_id], dtype=float).reshape(3)
 
-         # Apply physics updates
+         # Apply physics updates (each drone uses its own physics model)
          for d, u in zip(self.drones, us, strict=True):
-            d.x = self.physics.step(d.x, u)
+            d.x = d.kinematics.step(d.x, u)
 
-            # Keep the drone inside the room bounds. We clamp the position and zero the velocity component(s) that hit a wall.
+            # Keep the drone inside the room bounds.
             p = d.position()
-            p_min = self.room_min + d.radius
-            p_max = self.room_max - d.radius
 
-            p_clamped = np.clip(p, p_min, p_max)
-            hit = ~np.isclose(p_clamped, p)
-            if np.any(hit):
-               d.x[:3] = p_clamped
-               d.x[3:][hit] = 0.0
+            if self.room_radius is not None:
+               # Spherical room: clamp to sphere boundary centered at origin
+               dist_from_origin = float(np.linalg.norm(p))
+               max_dist = self.room_radius - d.radius
+
+               if dist_from_origin > max_dist and dist_from_origin > 1e-9:
+                  # Project position onto sphere surface
+                  p_clamped = p * (max_dist / dist_from_origin)
+                  d.x[:3] = p_clamped
+
+                  # Zero the radial velocity component (velocity component pointing outward)
+                  vel = d.velocity()
+                  radial_dir = p / dist_from_origin  # Unit vector from origin to drone
+                  radial_vel = np.dot(vel, radial_dir) * radial_dir
+                  # Only zero the outward component (if velocity is pointing outward)
+                  if np.dot(vel, radial_dir) > 0:
+                     d.x[3:6] = vel - radial_vel
+            else:
+               # Rectangular room: clamp to axis-aligned box
+               p_min = self.room_min + d.radius
+               p_max = self.room_max - d.radius
+
+               p_clamped = np.clip(p, p_min, p_max)
+               hit = ~np.isclose(p_clamped, p)
+               if np.any(hit):
+                  d.x[:3] = p_clamped
+                  d.x[3:][hit] = 0.0
 
             # Append trace point (after clamping).
             trace = self.traces.setdefault(d.drone_id, [])
@@ -245,10 +285,13 @@ class Simulator:
          self.compute_time_s += time.perf_counter() - t0
 
    def to_dict(self) -> dict:
-      return {"t": self.t, "dt": self.dt, "room": {"min": self.room_min.tolist(), "max": self.room_max.tolist()},
-            "drones": [{"drone_id": d.drone_id, "x": d.x.tolist(), "route_idx": d.route.idx,
-                        "p_ref": d.route.current_ref().tolist(), "radius": d.radius, "safety_zone": d.safety_zone,
-                        "drone_color": _color_to_json(d.color), "safety_color": _color_to_json(d.safety_color),
-                        "trace_color": _color_to_json(d.trace_color)} for d in self.drones],
-            "obstacles": [{"center": c.tolist(), "radius": r} for c, r in self.obstacles],
-            "collisions": list(self.last_collisions)}
+      # Room info: include both bounding box and radius if spherical
+      room_info: dict = {"min": self.room_min.tolist(), "max": self.room_max.tolist()}
+      if self.room_radius is not None:
+         room_info["r"] = self.room_radius
+
+      return {"t": self.t, "dt": self.dt, "room": room_info, "drones": [
+            {"drone_id": d.drone_id, "x": d.x.tolist(), "route_idx": d.route.idx, "p_ref": d.route.current_ref().tolist(), "radius": d.radius,
+             "safety_zone": d.safety_zone, "drone_color": _color_to_json(d.color), "safety_color": _color_to_json(d.safety_color),
+             "trace_color": _color_to_json(d.trace_color)} for d in self.drones], "obstacles": [{"center": c.tolist(), "radius": r} for c, r in self.obstacles],
+              "collisions": list(self.last_collisions)}

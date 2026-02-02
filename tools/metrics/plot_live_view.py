@@ -14,8 +14,8 @@ plt.rcParams.update({"font.size": 8, "axes.titlesize": 9, "axes.labelsize": 8, "
 
 # Default location of the live_view_horizon_grid folder, resolved relative to this file so it does not depend on the current
 # working directory when the script is executed.
-_DEFAULT_ROOT = (Path(__file__).resolve().parents[3] / "live_view_horizon_grid").resolve()
-FAILED = ["step_timeout", "overall_timeout", "infeasible", "error"]
+_DEFAULT_ROOT = (Path(__file__).resolve().parents[1] / "live_view_horizon_grid").resolve()
+FAILED = ["step_timeout", "overall_timeout", "infeasible", "error", "timeout", "max_steps", ]
 
 
 def find_result_dirs(root: Path) -> list[Path]:
@@ -66,19 +66,30 @@ def load_all_metrics(root: Path) -> pd.DataFrame:
    # TODO: solve future warning about empty of inconsistent frames
    df_all = pd.concat(frames, ignore_index=True)
 
-   # Keep all rows; some infeasible runs have steps == 0. We handle those explicitly when computing jerk_total and sim_time_s.
+   # Keep all rows; some infeasible runs have steps == 0. We handle those explicitly when computing jerk_total and wall_time_s.
    return df_all.copy()
 
 
-def prepare_sim_time_per_tolerance(df_tol: pd.DataFrame) -> pd.DataFrame:
-   """Compute `sim_time_s` for one tolerance slice.
-   """
-   df_tol = df_tol.sort_values(["num_drones", "horizon"]).copy()
+def load_metrics_from_csv_paths(csv_paths: list[Path]) -> pd.DataFrame:
+   frames: list[pd.DataFrame] = []
+   for csv_path in csv_paths:
+      if not csv_path.exists():
+         continue
+      label = csv_path.parent.parent.name
+      df = pd.read_csv(csv_path)
+      df["tolerance_label"] = label
+      df["tolerance"] = None
+      frames.append(df)
 
-   # Overall simulation time from start to end (approx.):
-   df_tol["sim_time_s"] = df_tol["frames"] * df_tol["mean_step_time_s"]
+   if not frames:
+      raise RuntimeError("No metrics.csv files found")
 
-   return df_tol
+   df_all = pd.concat(frames, ignore_index=True)
+   return df_all.copy()
+
+
+def find_metrics_csv_under_out_dir(root: Path) -> list[Path]:
+   return sorted(root.glob("*/out_dir/metrics.csv"))
 
 
 def cut_after_first_gap(df: pd.DataFrame, col: str = "horizon") -> pd.DataFrame | None:
@@ -112,13 +123,19 @@ def score_best_horizon(df_N: pd.DataFrame) -> float | None:
    Only finished runs are considered. Returns None if no finished simulations are available for this N.
    """
    df_finished = cut_after_first_gap(df_N[df_N["status"].astype(str).str.lower() == "finished"].copy())
-   if df_finished.empty:
+   if df_finished is None or df_finished.empty:
       return None
 
-   jerk = df_finished["jerk_3d_value"].astype(float)
-   if np.isnan(jerk).any():
+   if "jerk_3d_value" in df_finished.columns:
+      jerk = df_finished["jerk_3d_value"].astype(float)
+   elif "jerk_mean" in df_finished.columns:
       jerk = df_finished["jerk_mean"].astype(float)
-   time = df_finished["sim_time_s"].astype(float)
+   else:
+      return None
+
+   if np.isnan(jerk).all():
+      return None
+   time = df_finished["wall_time_s"].astype(float)
 
    j_min, j_max = float(jerk.min()), float(jerk.max())
    t_min, t_max = float(time.min()), float(time.max())
@@ -219,7 +236,7 @@ def plot_subplot_for_n(ax: plt.Axes, df_N: pd.DataFrame) -> None:
 
    # Right axis: overall simulation time (paper-style purple color)
    ax2 = ax.twinx()
-   ax2.plot(df_N["horizon"], df_N["sim_time_s"], marker="o", color="tab:purple", linewidth=1, markersize=4,
+   ax2.plot(df_N["horizon"], df_N["wall_time_s"], marker="o", color="tab:purple", linewidth=1, markersize=4,
             label="overall time [s]")
    ax2.set_ylabel("time [s]", color="black")
    ax2.tick_params(axis="y", labelcolor="black")
@@ -240,7 +257,7 @@ def plot_multidiagrams_per_tolerance(df: pd.DataFrame, out_dir: Path) -> None:
    all_N = sorted(df["num_drones"].unique())
 
    for tol_label, df_tol_raw in df.groupby("tolerance_label"):
-      df_tol = prepare_sim_time_per_tolerance(df_tol_raw)
+      df_tol = df_tol_raw.sort_values(["num_drones", "horizon"]).copy()
 
       fig, axes = plt.subplots(nrows=len(all_N), ncols=1, sharex=True, figsize=(8, 2.0 * len(all_N)))
       if len(all_N) == 1:
@@ -277,14 +294,49 @@ def main() -> None:
    parser = argparse.ArgumentParser(description=("Plot live_view_horizon_grid results as curves over horizon H."))
    parser.add_argument("--root", type=Path, default=_DEFAULT_ROOT,
                        help="Root folder that contains result folders (default: live_view_horizon_grid next to repo root)")
+   parser.add_argument("--metrics-glob", action="append", default=None,
+                       help="Glob to one or more metrics.csv files (repeatable), e.g. 'param_swep_result/*/out_dir/metrics.csv'")
+   parser.add_argument("--debug", action="store_true", help="Print debug information (e.g. which CSV files were loaded)")
    parser.add_argument("--out-dir", type=Path, default=None, help="Output directory for plots (default: <root>/plots)")
    args = parser.parse_args()
 
    root: Path = args.root
-   print(f"Plotting {root}")
-   out_dir: Path = args.out_dir or (root / "plots")
-
-   df = load_all_metrics(root)
+   if not root.exists():
+      raise FileNotFoundError(
+            f"Root folder does not exist: {root}. "
+            f"If you want to plot param sweeps, use --metrics-glob 'param_swep_result/*/out_dir/metrics.csv' "
+            f"(or point --root at an existing folder)."
+      )
+   if args.metrics_glob:
+      csv_paths: list[Path] = []
+      for pattern in args.metrics_glob:
+         p = Path(pattern)
+         if p.is_absolute():
+            csv_paths.extend([Path(x) for x in sorted(p.parent.glob(p.name))])
+         else:
+            csv_paths.extend([Path(x) for x in sorted(Path().glob(pattern))])
+      csv_paths = [p for p in csv_paths if p.exists()]
+      if args.debug:
+         print("CSV files (from --metrics-glob):")
+         for p in csv_paths:
+            print(f"  - {p}")
+      print(f"Plotting {len(csv_paths)} metrics.csv files")
+      out_dir: Path = args.out_dir or Path("plots")
+      df = load_metrics_from_csv_paths(csv_paths)
+   else:
+      sweep_csvs = find_metrics_csv_under_out_dir(root)
+      if sweep_csvs:
+         if args.debug:
+            print("CSV files (auto-detected under --root):")
+            for p in sweep_csvs:
+               print(f"  - {p}")
+         print(f"Plotting {len(sweep_csvs)} metrics.csv files under {root}")
+         out_dir = args.out_dir or (root / "plots")
+         df = load_metrics_from_csv_paths(sweep_csvs)
+      else:
+         print(f"Plotting {root}")
+         out_dir = args.out_dir or (root / "plots")
+         df = load_all_metrics(root)
 
    # Create one multi-diagram figure per tolerance with
    #   - total jerk (sum over direction changes)
