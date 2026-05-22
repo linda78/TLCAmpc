@@ -45,9 +45,15 @@ class DroneConfig(BaseModel):
    alpha: float | None = None
 
    # Safety zone mode. "fixed" uses the static safety_zone, "adaptive" uses
-   # velocity-dependent radius (requires alpha), "lstm" uses LSTM-predicted radii.
+   # velocity-dependent radius (requires adaptive), "lstm" uses LSTM-predicted radii.
    # Default "fixed" is backward compatible with all existing configs.
    safety_zone_mode: Literal["fixed", "adaptive", "lstm"] = "fixed"
+
+   # Drone class selector. "default" instantiates the plain Drone, "gated"
+   # instantiates GatedDrone which carries a wait-state used by the intersection-zone coordinator.
+   # Backwards-compatible:
+   # configs without this field get the plain Drone.
+   type: Literal["default", "gated"] = "default"
 
    # Colors used by the renderer. Each field accepts either:
    # - a matplotlib-compatible color string (e.g. "red", "tab:blue", "#ff00aa")

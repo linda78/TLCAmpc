@@ -107,14 +107,11 @@ class DirectBackend(SimulationBackend):
                core_color=core_color,
             ))
 
-      # Intersection spheres — only present when the coordinator is the
-      # IntersectionDMPCCoordinator (or a duck-typed equivalent that
-      # exposes ``intersection.active_spheres()``).
+      # Intersection spheres — only when the coordinator exposes active_spheres().
       intersection_spheres: list[IntersectionSphereView] = []
-      intersection = getattr(sim.coordinator, "intersection", None)
-      if intersection is not None and hasattr(intersection, "active_spheres"):
+      if hasattr(sim.coordinator, "active_spheres"):
          drone_by_id = {d.drone_id: d for d in sim.drones}
-         for pair, record in intersection.active_spheres().items():
+         for pair, record in sim.coordinator.active_spheres().items():
             priority = record.priority
             tint_drone = drone_by_id.get(priority) if priority is not None else None
             if tint_drone is not None:
