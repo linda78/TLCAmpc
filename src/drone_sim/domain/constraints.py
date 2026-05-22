@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 from drone_sim.domain.drone import Drone
+from drone_sim.domain.sphere_obstacle import SphereObstacle
 
 
 def points_to_box_dist(
@@ -303,7 +304,7 @@ class ObstacleAvoidanceConstraints(MPCConstraints):
       self,
       drone: Drone,
       pred_pos: np.ndarray,
-      obstacles: list[tuple[np.ndarray, np.ndarray]],
+      obstacles: list,
       pred_vel: np.ndarray | None = None,
    ) -> np.ndarray:
       """Evaluate static obstacle constraints.
@@ -315,17 +316,24 @@ class ObstacleAvoidanceConstraints(MPCConstraints):
 
       :param drone: the drone.
       :param pred_pos: predicted positions (horizon, 3).
-      :param obstacles: list of (center, half_extents) tuples.
+      :param obstacles: list of obstacles — each item is either an AABB
+             ``(center, half_extents)`` tuple or a :class:`SphereObstacle`.
       :param pred_vel: optional predicted velocities (horizon, 3).
       :return: constraint margin array.
       """
       parts = []
       radii = _safety_radii(drone, pred_vel, self._horizon)
-      for center, half_extents in obstacles:
-         obstacle_center = np.asarray(center, dtype=float).reshape(3)
-         obstacle_half_extents = np.asarray(half_extents, dtype=float).reshape(3)
-         dists = points_to_box_dist(pred_pos, obstacle_center, obstacle_half_extents)
-         row = dists - radii
+      for ob in obstacles:
+         if isinstance(ob, SphereObstacle):
+            sphere_center = np.asarray(ob.center, dtype=float).reshape(3)
+            dists = np.linalg.norm(pred_pos - sphere_center, axis=1)
+            row = dists - (radii + ob.radius)
+         else:
+            center, half_extents = ob
+            obstacle_center = np.asarray(center, dtype=float).reshape(3)
+            obstacle_half_extents = np.asarray(half_extents, dtype=float).reshape(3)
+            dists = points_to_box_dist(pred_pos, obstacle_center, obstacle_half_extents)
+            row = dists - radii
          parts.append(row)
       if not parts:
          return np.zeros(self._horizon)

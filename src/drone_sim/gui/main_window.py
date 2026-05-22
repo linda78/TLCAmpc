@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
 
 from drone_sim.gui.backend import StepResult, SimState
 from drone_sim.gui.direct_backend import DirectBackend
-from drone_sim.api.utils.render_helper import draw_room_wireframe, draw_sphere_wireframe, draw_trace, draw_obstacles, draw_obj_mesh, draw_prediction_tube
+from drone_sim.api.utils.render_helper import draw_room_wireframe, draw_sphere_wireframe, draw_trace, draw_obstacles, draw_obj_mesh, draw_prediction_tube, draw_intersection_spheres
 
 _MAX_RUN_STEPS = 5000  # run-to-completion cap (matches paper2_tools/scenarios.py default)
 _PREDICTION_TUBE_SAMPLES = 50           # arc-length samples per BoF prediction tube
@@ -273,6 +273,7 @@ class MainWindow(QMainWindow):
         draw_room_wireframe(self._ax, room_min, room_max)
 
         draw_obstacles(self._ax, sim_state.obstacles)
+        draw_intersection_spheres(self._ax, result.intersection_spheres)
 
         # Draw drones
         for drone in result.drones:
@@ -390,6 +391,7 @@ class MainWindow(QMainWindow):
 
         draw_room_wireframe(ax, sim_state.room_min, sim_state.room_max)
         draw_obstacles(ax, sim_state.obstacles)
+        draw_intersection_spheres(ax, result.intersection_spheres)
 
         for drone in result.drones:
             pos = drone.position
