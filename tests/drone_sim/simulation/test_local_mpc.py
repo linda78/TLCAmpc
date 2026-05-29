@@ -34,7 +34,7 @@ def _make_drone(
         controller=controller,
         physics=LinearKinematicsPhysics(dt=dt),
         x=np.asarray(x, dtype=float).reshape(6),
-        route=Route(waypoints=[], target=np.asarray(target, dtype=float).reshape(3)),
+        route=Route(start=np.asarray(x, dtype=float).reshape(6)[:3], waypoints=[], target=np.asarray(target, dtype=float).reshape(3)),
         alpha=alpha,
     )
 

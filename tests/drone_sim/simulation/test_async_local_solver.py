@@ -40,7 +40,7 @@ def create_test_drone(drone_id: str, position: np.ndarray, safety_zone: float = 
         controller=controller,
         physics=physics,
         x=np.concatenate([position, np.zeros(3)]),  # 6D state: [pos, vel]
-        route=Route(waypoints=[], target=position.copy()),  # Target is current position
+        route=Route(start=position.copy(), waypoints=[], target=position.copy()),  # Target is current position
         alpha=None,
     )
 

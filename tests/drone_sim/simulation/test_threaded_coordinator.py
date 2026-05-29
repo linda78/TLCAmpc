@@ -35,7 +35,7 @@ def create_test_drone(drone_id: str, position: np.ndarray, safety_zone: float = 
         controller=controller,
         physics=physics,
         x=np.concatenate([position, np.zeros(3)]),  # 6D state: [pos, vel]
-        route=Route(waypoints=[], target=position.copy()),  # Target is current position
+        route=Route(start=position.copy(), waypoints=[], target=position.copy()),  # Target is current position
         alpha=None,
     )
 
@@ -128,7 +128,7 @@ class TestThreadedCoordinatorSolveControls:
             controller=DummyController(),
             physics=physics,
             x=np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-            route=Route(waypoints=[], target=np.array([0.0, 0.0, 0.0])),
+            route=Route(start=np.array([0.0, 0.0, 0.0]), waypoints=[], target=np.array([0.0, 0.0, 0.0])),
             alpha=None,
         )
 
@@ -340,7 +340,7 @@ class TestThreadedCoordinatorIntegration:
             controller=controller1,
             physics=physics1,
             x=np.array([0.0, 0.0, 0.0, 1.0, 0.0, 0.0]),  # Moving in +x direction
-            route=Route(waypoints=[], target=np.array([5.0, 0.0, 0.0])),
+            route=Route(start=np.array([0.0, 0.0, 0.0]), waypoints=[], target=np.array([5.0, 0.0, 0.0])),
             alpha=None,
         )
 
@@ -355,7 +355,7 @@ class TestThreadedCoordinatorIntegration:
             controller=controller2,
             physics=physics2,
             x=np.array([5.0, 0.0, 0.0, -1.0, 0.0, 0.0]),  # Moving in -x direction
-            route=Route(waypoints=[], target=np.array([0.0, 0.0, 0.0])),
+            route=Route(start=np.array([5.0, 0.0, 0.0]), waypoints=[], target=np.array([0.0, 0.0, 0.0])),
             alpha=None,
         )
 

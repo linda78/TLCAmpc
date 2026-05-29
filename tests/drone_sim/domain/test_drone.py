@@ -88,14 +88,14 @@ class TestRoute:
 
    def test_advance_if_reached_edge_case_very_small_radius(self):
       """Test advance_if_reached with very small waypoint_radius."""
-      route = Route(waypoints=[np.array([1.0, 1.0, 1.0])], target=np.array([5.0, 5.0, 5.0]), waypoint_radius=0.001)
+      route = Route(start=np.zeros(3), waypoints=[np.array([1.0, 1.0, 1.0])], target=np.array([5.0, 5.0, 5.0]), waypoint_radius=0.001)
       position = np.array([1.0, 1.0, 1.0005])
       route.advance_if_reached(position)
       assert route.idx == 1
 
    def test_advance_if_reached_edge_case_zero_radius(self):
       """Test advance_if_reached with zero waypoint_radius (must be exactly at point)."""
-      route = Route(waypoints=[np.array([1.0, 1.0, 1.0])], target=np.array([5.0, 5.0, 5.0]), waypoint_radius=0.0)
+      route = Route(start=np.zeros(3), waypoints=[np.array([1.0, 1.0, 1.0])], target=np.array([5.0, 5.0, 5.0]), waypoint_radius=0.0)
       # Exactly at waypoint
       position = np.array([1.0, 1.0, 1.0])
       route.advance_if_reached(position)
@@ -126,7 +126,7 @@ class TestRoute:
 
    def test_route_single_waypoint(self):
       """Test Route with a single waypoint."""
-      route = Route(waypoints=[np.array([2.0, 2.0, 2.0])], target=np.array([5.0, 5.0, 5.0]))
+      route = Route(start=np.zeros(3), waypoints=[np.array([2.0, 2.0, 2.0])], target=np.array([5.0, 5.0, 5.0]))
       assert route.current_ref()[0] == 2.0
       route.advance_if_reached(np.array([2.0, 2.0, 2.0]))
       assert route.idx == 1
@@ -135,7 +135,7 @@ class TestRoute:
    def test_route_many_waypoints(self):
       """Test Route with many waypoints."""
       waypoints = [np.array([float(i), float(i), float(i)]) for i in range(100)]
-      route = Route(waypoints=waypoints, target=np.array([100.0, 100.0, 100.0]))
+      route = Route(start=np.zeros(3), waypoints=waypoints, target=np.array([100.0, 100.0, 100.0]))
       assert len(route.waypoints) == 100
       assert route.current_ref()[0] == 0.0
 
@@ -146,7 +146,8 @@ class TestRoute:
 
    def test_destination_reached(self):
       """Test destination_reached."""
-      route = Route(waypoints=[np.array([float(i), float(i), float(i)]) for i in range(5)],
+      route = Route(start=np.zeros(3),
+                    waypoints=[np.array([float(i), float(i), float(i)]) for i in range(5)],
                     target=np.array([5.0, 5.0, 5.0]))
       assert not route.target_reached(np.array([5.0, 5.0, 5.01]), thresh=1e-3)
       assert not route.target_reached(np.array([5.0, 5.0, 5.001]), thresh=1e-3)
