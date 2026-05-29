@@ -14,6 +14,8 @@ import numpy as np
 import matplotlib.image as mpimg
 import matplotlib.pyplot as plt
 from PIL import Image
+from tools.franck.compute_path import compute_n_drone_collision_paths
+from tools.franck.config_plot import configure_plt
 
 from drone_sim.api.render import render_png
 from drone_sim.domain.config import ScenarioConfig
@@ -75,6 +77,7 @@ def live_view_simulator(sim: Simulator, *, steps: int, step_n: int, sleep_s: flo
                         record_dir: str | Path | None, gif_path: str | Path | None, gif_fps: float,
                         obj_name: str | None = None, show_live: bool = True) -> None:
    """Step ``sim`` and render frames; optionally show a live matplotlib window and/or save PNGs/GIF."""
+   configure_plt()                        
    record_path = Path(record_dir) if record_dir is not None else None
    if record_path is not None:
       record_path.mkdir(parents=True, exist_ok=True)
@@ -92,6 +95,9 @@ def live_view_simulator(sim: Simulator, *, steps: int, step_n: int, sleep_s: flo
       ax.set_axis_off()
 
    all_reached = False
+   start_positions = [d.start_position if d.start_position is not None else d.position() for d in sim.drones]
+   paths, collision_point = compute_n_drone_collision_paths(positions=start_positions, cube_side=6.0, T=steps)
+
    for i in range(steps):
       if all_reached:
          break
@@ -129,8 +135,18 @@ def live_view_simulator(sim: Simulator, *, steps: int, step_n: int, sleep_s: flo
       admm_converged = sim.coordinator.get_last_converged() if is_distributed else None
 
       obj_path = str(Path(__file__).resolve().parent.parent / "src" / "drone_sim" / "resources" / "assets" / obj_name) if obj_name else None
-      png_bytes = render_png(room_min=sim.room_min, room_max=sim.room_max, drones=sim.drones,
-                             drone_traces=traces, obstacles=sim.obstacles,
+
+      # Start / Target markers for every drone
+      drone_markers = []
+      for d in sim.drones:
+          # Start position
+          drone_markers.append({"position": d.start_position, "color": d.color, "marker": "s", "size": 200, "label": f"{d.drone_id} start"})    
+          # Target position
+          drone_markers.append({"position": d.route.target, "color": d.color, "marker": "X", "size": 200, "label": f"{d.drone_id} target"})
+          
+      png_bytes = render_png(room_min=sim.room_min, room_max=sim.room_max, drones=sim.drones, 
+                             drone_markers=drone_markers, drone_traces=traces, obstacles=sim.obstacles,
+                             reference_paths=paths, collision_point=collision_point,
                              step_count=sim.step_count, compute_time_s=sim.compute_time_s,
                              neighbor_links=neighbor_links, admm_iteration_count=admm_iteration_count, admm_converged=admm_converged,
                              safety_alphas=safety_alphas,
@@ -162,7 +178,9 @@ def live_view_simulator(sim: Simulator, *, steps: int, step_n: int, sleep_s: flo
          time.sleep(sleep_s)
 
       all_reached = all_drones_reached_destination(sim.drones)
-      print(f"All drones reached: {all_reached}")
+      if all_reached == True:
+         print(f"All drones reached: {all_reached}")
+         break
 
    if show_live:
       plt.ioff()
@@ -215,7 +233,7 @@ def main(argv: list[str] | None = None) -> None:
    p.add_argument("--gif-fps", type=float, default=20.0, help="FPS for the generated GIF")
 
    p.add_argument("--width", type=int, default=900)
-   p.add_argument("--height", type=int, default=700)
+   p.add_argument("--height", type=int, default=900)
    p.add_argument("--dpi", type=int, default=120)
    p.add_argument("--elev", type=float, default=20.0)
    p.add_argument("--azim", type=float, default=-60.0)

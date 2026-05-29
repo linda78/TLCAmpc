@@ -119,7 +119,7 @@ def draw_room_wireframe(ax: object, room_min: np.ndarray, room_max: np.ndarray) 
    edges = _get_edges(x0, y0, z0, x1, y1, z1)
 
    for (xa, ya, za), (xb, yb, zb) in edges:
-      ax.plot([xa, xb], [ya, yb], [za, zb], color="black", linewidth=1.0, alpha=0.4)
+      ax.plot([xa, xb], [ya, yb], [za, zb], color="black", linewidth=2.0, alpha=0.4)
 
 
 def draw_sphere_wireframe(ax: object, center: np.ndarray, radius: float, *, color: str, alpha: float, lw: float, resolution: int = 24) -> None:
@@ -131,7 +131,7 @@ def draw_sphere_wireframe(ax: object, center: np.ndarray, radius: float, *, colo
    y = center[1] + radius * np.outer(np.sin(u), np.sin(v))
    z = center[2] + radius * np.outer(np.ones_like(u), np.cos(v))
 
-   ax.plot_wireframe(x, y, z, color=color, linewidth=lw, alpha=alpha, rstride=2, cstride=2)
+   ax.plot_wireframe(x, y, z, color=color, linewidth=1, alpha=alpha, rstride=2, cstride=2)
 
 
 def draw_box_wireframe(ax: object, center: np.ndarray, half_extents: np.ndarray, *, color: str, alpha: float, lw: float) -> None:
@@ -164,8 +164,9 @@ def draw_trace(ax: object, trace: list[np.ndarray]|list[list[float]], trace_colo
    # Trace as a dotted/pointed line + a small arrow.
    if trace and len(trace) >= 2:
       T = np.stack([np.asarray(tp, dtype=float).reshape(3) for tp in trace], axis=0)
-      ax.plot(T[:, 0], T[:, 1], T[:, 2], color=trace_color, linewidth=1.2, alpha=0.9, linestyle=":", marker=".", markersize=2.5)
-
+      ax.plot(T[:, 0], T[:, 1], T[:, 2], color=trace_color, linewidth=2.0, alpha=0.9, linestyle="-")
+      
+      '''
       p1 = T[-1]
       d = p1 - T[-2]
       dn = float(np.linalg.norm(d))
@@ -174,7 +175,7 @@ def draw_trace(ax: object, trace: list[np.ndarray]|list[list[float]], trace_colo
          arrow_len = 0.35
          ax.quiver(p1[0] - arrow_len * d[0], p1[1] - arrow_len * d[1], p1[2] - arrow_len * d[2], arrow_len * d[0], arrow_len * d[1], arrow_len * d[2],
                    color=trace_color, linewidth=1.0, arrow_length_ratio=0.35)
-
+      '''
 
 def draw_prediction_tube(ax: object, points: np.ndarray, radii: np.ndarray, *, color, n_samples: int = 50, n_circumference: int = 14, alpha: float = 0.15,
                          centerline_alpha: float = 0.4, draw_centerline: bool = True) -> None:

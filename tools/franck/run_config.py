@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import numpy as np
 
-from tools.franck.generate_points import generate_random_points
+from tools.franck.generate_points import drone_jam, generate_random_points
 
-DRONE_COLORS = ["#00FFFF", "#800080", "#DC143C", "#008B8B"]
+# [Red, Orange, Yellow-Green, Green, Cyan, Blue, Violet, Magenta]
+DRONE_COLORS = ["#ff0000", "#ff7f00", "#d4ff00", "#00ff4f", "#00ffff", "#004fff", "#7f00ff", "#ff00d4"]
+
 
 
 def random_pairs(*, n: int, room_extent: float, safety_zone: float, min_dist: float, seed: int, max_attempts: int, target_mode: str, ) -> list[
@@ -32,7 +35,7 @@ def build_config(pairs: list[tuple[list[float], list[float]]], *, room_extent: f
    bound = float(room_extent)
    return {"dt": 0.1, "room": {"min": [-bound, -bound, -bound], "max": [bound, bound, bound]}, "physics": [
          {"id": "franck", "type": "linear_kinematics", "params": {"v_max": v_max, "u_min": [-u_max, -u_max, -u_max], "u_max": [u_max, u_max, u_max], }, }],
-         "controller": {"type": "mpc_agent_adaptive",
+         "controller": {"type": "mpc_agent",
                "params": {"horizon": horizon, "q_pos": [2.0, 2.0, 2.0], "q_vel": [0.1, 0.1, 0.1], "r_u": [0.5, 0.5, 0.5], }, },
          "coordinator": {"type": "mpc_central", "params": {"horizon": horizon, "room_wall_tolerance": 0.5}, }, "drones": [
                {"drone_id": f"drone-{i + 1}", "physics": "franck", "start": list(start), "target": list(target), "radius": radius, "safety_zone": safety_zone,
@@ -40,10 +43,10 @@ def build_config(pairs: list[tuple[list[float], list[float]]], *, room_extent: f
 
 
 def parse_args() -> argparse.Namespace:
-   p = argparse.ArgumentParser(description="Build a Franck-style 4-drone scenario config in memory and run the Simulator.", )
+   p = argparse.ArgumentParser(description="Build a Franck-style 8-drone scenario config in memory and run the Simulator.", )
    p.add_argument("--extent", type=float, default=2.0, help="Half-side of the corner cube (corners mode only; default: 2.0)")
-   p.add_argument("--num-drones", type=int, default=4, help="Number of drones")
-   p.add_argument("--seed", type=int, default=42, help="Random seed")
+   p.add_argument("--num-drones", type=int, default=8, help="Number of drones")
+   p.add_argument("--seed", type=int, default=50, help="Random seed")
    p.add_argument("--min-dist", type=float, default=None, help="Minimum spacing between sampled points (default: 2 * safety_zone)")
    p.add_argument("--max-attempts", type=int, default=1000, help="Max sampling attempts per point")
    p.add_argument("--target-mode", choices=["antipodal", "independent"], default="antipodal",
@@ -53,7 +56,7 @@ def parse_args() -> argparse.Namespace:
    p.add_argument("--u-max", type=float, default=2.0)
    p.add_argument("--horizon", type=int, default=10)
    p.add_argument("--safety-zone", type=float, default=1.0)
-   p.add_argument("--alpha", type=float, default=0.33)
+   p.add_argument("--alpha", type=float, default=None)
    p.add_argument("--radius", type=float, default=0.5)
    p.add_argument("--start", nargs=4, action="append", default=[], metavar=("DRONE", "X", "Y", "Z"),
                   help="Override start of drone DRONE (1-indexed). Repeatable.")
@@ -68,7 +71,7 @@ def parse_args() -> argparse.Namespace:
    p.add_argument("--gif", dest="gif_path", default=None, help="If set, write an animated GIF to this path")
    p.add_argument("--gif-fps", type=float, default=20.0, help="FPS for the generated GIF")
    p.add_argument("--width", type=int, default=900, help="Render width (live-view/save mode only)")
-   p.add_argument("--height", type=int, default=700, help="Render height (live-view/save mode only)")
+   p.add_argument("--height", type=int, default=900, help="Render height (live-view/save mode only)")
    p.add_argument("--dpi", type=int, default=120, help="Render DPI (live-view/save mode only)")
    p.add_argument("--elev", type=float, default=20.0, help="Camera elevation (live-view/save mode only)")
    p.add_argument("--azim", type=float, default=-60.0, help="Camera azimuth (live-view/save mode only)")
@@ -94,15 +97,37 @@ def apply_overrides(pairs: list[tuple[list[float], list[float]]], starts: list[l
 
 def main() -> None:
    args = parse_args()
+   seeds = ['na', 14, 25, 27, 36, 40, 42, 45, 50, 55, 80]
 
-   min_dist = args.min_dist if args.min_dist is not None else 2.0 * args.safety_zone
-   pairs = random_pairs(n=args.num_drones, room_extent=args.room_extent, safety_zone=args.safety_zone, min_dist=min_dist, seed=args.seed,
+   for seed in seeds:
+      if seed == 'na':
+         positions = drone_jam(cube_side=6.0, drone_radius=1.0, v_max=1.0, u_max=2.0)
+         positions = positions[:args.num_drones]
+         starts = [[float(c) for c in p] for p in positions]
+         targets = [[-float(c) for c in s] for s in starts]
+         pairs = list(zip(starts, targets))
+           
+      else: 
+         min_dist = args.min_dist if args.min_dist is not None else 2.0 * args.safety_zone
+         pairs = random_pairs(n=args.num_drones, room_extent=args.room_extent, safety_zone=args.safety_zone, min_dist=min_dist, seed=args.seed,
          max_attempts=args.max_attempts, target_mode=args.target_mode, )
-   pairs = apply_overrides(pairs, args.start, args.target)
-
-   config = build_config(pairs, room_extent=args.room_extent, v_max=args.v_max, u_max=args.u_max, horizon=args.horizon, safety_zone=args.safety_zone,
+      
+      pairs = apply_overrides(pairs, args.start, args.target)
+      config = build_config(pairs, room_extent=args.room_extent, v_max=args.v_max, u_max=args.u_max, horizon=args.horizon, safety_zone=args.safety_zone,
          alpha=args.alpha, radius=args.radius, )
 
+      import json
+      import jsbeautifier
+      from datetime import datetime
+       
+      filename = datetime.now().strftime(f"configs/franck/scenario_seed_{seed}.json")  
+      options = jsbeautifier.default_options()
+      options.indent_size = 2
+      formatted_json = jsbeautifier.beautify(json.dumps(config), options)   
+      with open(filename, "w") as f:
+           f.write(formatted_json)
+
+   
    from drone_sim.domain.config import ScenarioConfig
    from drone_sim.simulation.simulator import Simulator
 

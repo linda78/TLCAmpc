@@ -18,7 +18,8 @@ class DroneState:
     color: str | list[float]
     safety_color: str | list[float]
     trace_color: str | list[float]
-
+    start: np.ndarray
+    target: np.ndarray
 
 @dataclass
 class PredictedTrajectory:
@@ -49,6 +50,11 @@ class StepResult:
     all_reached: bool = False              # True when all drones are at their destination
     admm_iteration_count: int | None = None  # None for non-ADMM coordinators
     predictions: list[PredictedTrajectory] = field(default_factory=list)
+    reference_paths: list[np.ndarray] | None = None
+    collision_point: np.ndarray | None = None 
+    start_positions: list[np.ndarray] | None = None
+    target_positions: list[np.ndarray] | None = None
+
 
 
 @dataclass
@@ -61,6 +67,10 @@ class SimState:
     step_count: int
     room_min: np.ndarray
     room_max: np.ndarray
+    start_positions: list[np.ndarray]
+    target_positions: list[np.ndarray]
+    reference_paths: list[np.ndarray] | None=None
+    collision_point: np.ndarray | None=None
     config_path: str | None = None   # absolute path to loaded JSON; None before first load
 
 
