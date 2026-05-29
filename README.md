@@ -16,7 +16,7 @@ pip install -e ".[dev]"
 windows:
 ```bash
 python -m venv .venv
-call .venv/bin/activate
+call .venv/scripts/activate
 pip install -e ".[dev]"
 ```
 
