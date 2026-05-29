@@ -160,13 +160,17 @@ def draw_ghost_max_sphere(ax: object, drone: Drone, print_always: bool = False):
          draw_sphere_wireframe(ax, pos, max_r, color=drone.safety_color, alpha=0.12, lw=0.4)
 
 
+def draw_trace_for_franck(ax: object, trace: list[np.ndarray] | list[list[float]], trace_color) -> None:
+   if trace and len(trace) >= 2:
+      T = np.stack([np.asarray(tp, dtype=float).reshape(3) for tp in trace], axis=0)
+      ax.plot(T[:, 0], T[:, 1], T[:, 2], color=trace_color, linewidth=2.0, alpha=0.9, linestyle="-")
+
 def draw_trace(ax: object, trace: list[np.ndarray]|list[list[float]], trace_color) -> None:
    # Trace as a dotted/pointed line + a small arrow.
    if trace and len(trace) >= 2:
       T = np.stack([np.asarray(tp, dtype=float).reshape(3) for tp in trace], axis=0)
-      ax.plot(T[:, 0], T[:, 1], T[:, 2], color=trace_color, linewidth=2.0, alpha=0.9, linestyle="-")
-      
-      '''
+      ax.plot(T[:, 0], T[:, 1], T[:, 2], color=trace_color, linewidth=1.0, alpha=0.9, linestyle="-")
+
       p1 = T[-1]
       d = p1 - T[-2]
       dn = float(np.linalg.norm(d))
@@ -175,7 +179,6 @@ def draw_trace(ax: object, trace: list[np.ndarray]|list[list[float]], trace_colo
          arrow_len = 0.35
          ax.quiver(p1[0] - arrow_len * d[0], p1[1] - arrow_len * d[1], p1[2] - arrow_len * d[2], arrow_len * d[0], arrow_len * d[1], arrow_len * d[2],
                    color=trace_color, linewidth=1.0, arrow_length_ratio=0.35)
-      '''
 
 def draw_prediction_tube(ax: object, points: np.ndarray, radii: np.ndarray, *, color, n_samples: int = 50, n_circumference: int = 14, alpha: float = 0.15,
                          centerline_alpha: float = 0.4, draw_centerline: bool = True) -> None:

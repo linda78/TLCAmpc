@@ -5,6 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
+from drone_sim.domain.drone import Route
+
 
 @dataclass
 class DroneState:
@@ -18,8 +20,7 @@ class DroneState:
     color: str | list[float]
     safety_color: str | list[float]
     trace_color: str | list[float]
-    start: np.ndarray
-    target: np.ndarray
+    route: RouteState
 
 @dataclass
 class PredictedTrajectory:
@@ -39,6 +40,23 @@ class PredictedTrajectory:
 
 
 @dataclass
+class RouteState:
+    """GUI-side snapshot of a domain `Route`. Decouples the GUI from the live
+    simulator state — mutating any field here MUST NOT affect the simulator."""
+
+    start: np.ndarray
+    waypoints: list[np.ndarray]
+    target: np.ndarray
+    start_to_dest_ref_path: np.ndarray  # precomputed reference polyline; required.
+    waypoint_radius: float = 0.5
+    idx: int = 0
+
+    @classmethod
+    def from_route(cls, route: Route, *, start_to_dest_ref_path: np.ndarray) -> RouteState:
+        return cls(start=np.array(route.start, copy=True), waypoints=[np.array(w, copy=True) for w in route.waypoints],
+              target=np.array(route.target, copy=True), waypoint_radius=route.waypoint_radius, idx=route.idx, start_to_dest_ref_path=start_to_dest_ref_path, )
+
+@dataclass
 class StepResult:
     drones: list[DroneState]
     safety_radii: list[float]         # current effective safety radius per drone
@@ -50,11 +68,6 @@ class StepResult:
     all_reached: bool = False              # True when all drones are at their destination
     admm_iteration_count: int | None = None  # None for non-ADMM coordinators
     predictions: list[PredictedTrajectory] = field(default_factory=list)
-    reference_paths: list[np.ndarray] | None = None
-    collision_point: np.ndarray | None = None 
-    start_positions: list[np.ndarray] | None = None
-    target_positions: list[np.ndarray] | None = None
-
 
 
 @dataclass
@@ -67,10 +80,6 @@ class SimState:
     step_count: int
     room_min: np.ndarray
     room_max: np.ndarray
-    start_positions: list[np.ndarray]
-    target_positions: list[np.ndarray]
-    reference_paths: list[np.ndarray] | None=None
-    collision_point: np.ndarray | None=None
     config_path: str | None = None   # absolute path to loaded JSON; None before first load
 
 

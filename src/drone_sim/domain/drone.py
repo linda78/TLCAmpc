@@ -18,6 +18,7 @@ def has_central_cost(ctrl: object) -> bool:
 
 @dataclass
 class Route:
+   start: np.ndarray
    waypoints: list[np.ndarray]
    target: np.ndarray
    waypoint_radius: float = 0.5
@@ -52,7 +53,6 @@ class Drone:
    physics: PhysicsModel
    x: np.ndarray  # [x,y,z,vx,vy,vz]
    route: Route
-   start_position: np.ndarry | None = None
 
    # Adaptive safety zone parameter. When set, the drone uses a velocity-dependent
    # safety radius instead of the fixed safety_zone.

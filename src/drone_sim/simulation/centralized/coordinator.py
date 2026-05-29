@@ -24,7 +24,7 @@ class CentralMPCGlobalCoordinator:
    """
 
    dt: float
-   horizon: int = 10
+   horizon: int = 5
    room_wall_tolerance: float = 0.0
 
    # Small acceleration used for warm-start symmetry breaking.

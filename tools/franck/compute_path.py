@@ -13,6 +13,8 @@ import numpy as np
 from tools.franck.generate_points import generate_random_points
 
 # %% SHOW THE DRONES REFERENCE PATHS AS DOTTED LINES FROM INITIAL POSITION TO TARGET POSITION
+# Comment: function name says something else. Fine for own usage of course, but for the overall usage there is at least a bit of confusion.
+# Because i only saw the naming, i created drone_sim.utils.helper.start_to_dest_ref_path for the reference path. (LM)
 def compute_n_drone_collision_paths(positions, cube_side, T=100, collision_time=0.5, post_collision_steps=20):
     """
     Generates reference paths where N drones create a collision scenario.

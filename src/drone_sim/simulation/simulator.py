@@ -104,15 +104,15 @@ class Simulator:
          # Resolve per-drone physics: lookup by drone's physics ID, fall back to first/global
          drone_physics = physics_by_id.get(drone_cfg.physics, physics)
 
-         route = Route(waypoints=[np.asarray(w, dtype=float) for w in drone_cfg.waypoints], target=np.asarray(drone_cfg.target, dtype=float))
+         route = Route(start=np.asarray(drone_cfg.start, dtype=float), waypoints=[np.asarray(w, dtype=float) for w in drone_cfg.waypoints], target=np.asarray(drone_cfg.target, dtype=float))
          drone_color = _normalize_color(drone_cfg.drone_color)
          safety_color = _normalize_color(drone_cfg.safety_color or drone_cfg.drone_color)
          trace_color = _normalize_color(drone_cfg.trace_color or drone_cfg.drone_color)
 
          drones.append(
             Drone(drone_id=drone_cfg.drone_id, radius=drone_cfg.radius, safety_zone=drone_cfg.safety_zone, cons_stop=drone_cfg.cons_stop, color=drone_color,
-                  safety_color=safety_color, trace_color=trace_color, controller=controller, physics=drone_physics, x=x0, route=route, 
-                  start_position=np.array(start, dtype=float), alpha=drone_cfg.alpha, safety_zone_mode=drone_cfg.safety_zone_mode))
+                  safety_color=safety_color, trace_color=trace_color, controller=controller, physics=drone_physics, x=x0, route=route, alpha=drone_cfg.alpha,
+                  safety_zone_mode=drone_cfg.safety_zone_mode))
 
       obstacles = [(np.asarray(o.center, dtype=float), np.asarray(o.half_extents, dtype=float)) for o in cfg.obstacles]
 
@@ -150,7 +150,7 @@ class Simulator:
          _lstm_history = TrajectoryHistoryBuffer(m=20)
          _loader = LSTMModelLoader(Path(cfg.lstm_model_path))
          _propagator = UncertaintyPropagator()
-         _horizon = cfg.coordinator.params.get("horizon", 10) if cfg.coordinator else 10
+         _horizon = cfg.coordinator.params.get("horizon", 5) if cfg.coordinator else 5
          sim._lstm_history = _lstm_history
          sim._lstm_provider = LSTMSafetyZoneProvider(_loader, _propagator, _lstm_history, horizon=_horizon, # lstm_look_ahead is deprecated!
                look_ahead=cfg.lstm_look_ahead, )
@@ -164,7 +164,7 @@ class Simulator:
             BoFLibraryAdapter,
             BoFRestAdapter,
          )
-         _mpc_horizon = cfg.coordinator.params.get("horizon", 10) if cfg.coordinator else 10
+         _mpc_horizon = cfg.coordinator.params.get("horizon", 5) if cfg.coordinator else 5
          _bof_horizon = cfg.bof_horizon
          if _bof_horizon < _mpc_horizon:
             raise ValueError(

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from itertools import combinations
 from pathlib import Path
 
 import numpy as np
@@ -11,11 +12,12 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget)
 
+from drone_sim.domain.utils.helper import collision_point
 from drone_sim.gui.backend import StepResult, SimState
 from drone_sim.gui.direct_backend import DirectBackend
 from drone_sim.api.utils.render_helper import draw_room_wireframe, draw_sphere_wireframe, draw_trace, draw_obstacles, draw_obj_mesh, draw_prediction_tube
 
-_MAX_RUN_STEPS = 500  # run-to-completion cap (matches paper2_tools/scenarios.py default)
+_MAX_RUN_STEPS = 5000                   # run-to-completion cap (matches paper2_tools/scenarios.py default)
 _PREDICTION_TUBE_SAMPLES = 50           # arc-length samples per BoF prediction tube
 _PREDICTION_TUBE_OUTER_ALPHA = 0.03     # safety-zone tube
 _PREDICTION_TUBE_INNER_ALPHA = 0.08     # core (drone-radius) tube
@@ -48,14 +50,12 @@ class MainWindow(QMainWindow):
         self._playing: bool = False
         self._interval_ms: int = 100
         self._traces: dict[str, list[list[float]]] = {}
-        self._start_positions: dict[str, np.ndarray] = {}       
         self._zoom: float = 1.0  # <1 zoomed in, >1 zoomed out; applied to room limits
         self._run_to_completion: bool = False
         self._obj_path: Path | None = None  # path to .obj file for 3D drone model
         self._obj_scale: float = 0.3  # scale of the OBJ model in world units
         self._last_result: StepResult | None = None
-        self._show_reference_elements: bool = False
-        
+        self._show_reference_elements: bool = False # Flag to show reference paths and collision point
         # Recording state (live MP4/GIF capture of the canvas)
         self._recording: bool = False
         self._video_writer: object | None = None
@@ -80,10 +80,9 @@ class MainWindow(QMainWindow):
         self._btn_record = QPushButton("Record")
         self._btn_obj_model = QPushButton("OBJ Model")
         self._obj_model_label = QLabel("Model: scatter")
+        #Reference points button
         self._btn_reference = QPushButton("Reference Points")
         self._btn_reference.setCheckable(True)
-        self._btn_reference.setChecked(False)
-        self._btn_reference.clicked.connect(self._toggle_reference_elements)
 
         # ---- Status widgets ----
         self._collision_label = QLabel("No Collisions")
@@ -137,6 +136,7 @@ class MainWindow(QMainWindow):
         self._btn_screenshot.clicked.connect(self._on_screenshot)
         self._btn_record.clicked.connect(self._on_record)
         self._btn_obj_model.clicked.connect(self._on_select_obj_model)
+        self._btn_reference.clicked.connect(self._toggle_reference_elements)
         self._speed_slider.valueChanged.connect(self._on_speed_changed)
 
         # ---- Keyboard shortcuts ----
@@ -162,19 +162,11 @@ class MainWindow(QMainWindow):
         self._playing = False
         self._traces = {}
         self._zoom = 1.0
+        #TODO DRY Princip is broken, fix it!!
         # Call step() once to get initial drone positions for first render.
         # (SimState from load_config has counts only, no per-drone positions.)
         # Research note (open question 3): simplest approach is one probe step on load.
-        result = self._backend.initial_result()
-        # Store immutable start positions from simulator drones
-        self._start_positions.clear()
-        
-        sim = self._backend._sim
-        if sim is not None:
-            for drone in sim.drones:
-                if drone.start_position is not None:
-                    self._start_positions[drone.drone_id] = drone.start_position.copy() 
-                    
+        result = self._backend.step() # raises error if cfg or sim is not set
         for drone in result.drones:
             self._traces.setdefault(drone.drone_id, []).append(drone.position.tolist())
         self._redraw(result)
@@ -205,16 +197,9 @@ class MainWindow(QMainWindow):
         self._backend.reset()
         # Draw initial frame after reset via one probe step.
         # Intentional: reset always shows step 1 (research open question 3).
-        result = self._backend.initial_result()
+        result = self._backend.step()
         for drone in result.drones:
             self._traces.setdefault(drone.drone_id, []).append(drone.position.tolist())
-            
-            # Draw start marker (square marker)
-            s = self._start_positions.get(drone.drone_id)
-            if s is not None:
-                drone_color = (drone.color if isinstance(drone.color, str) else tuple(drone.color[:3]))
-                self._ax.scatter([s[0]], [s[1]], [s[2]], s=50, marker='s', c=[drone_color], alpha=0.7, depthshade=False,)
-        
         self._redraw(result)
         self._update_step_label(result)
         self._update_collision_indicator(result)
@@ -261,9 +246,12 @@ class MainWindow(QMainWindow):
             reason = result.infeasible_reason or "Solver reported infeasible controls."
             QMessageBox.warning(self, "Solver Infeasible", reason)
             return  # do NOT reschedule (pitfall 6)
-        for drone in result.drones:
-            self._traces.setdefault(drone.drone_id, []).append(drone.position.tolist())
-              
+        # Stop appending samples once destinations are reached — otherwise every
+        # idle reached-tick stacks a duplicate frozen position onto the trace.
+        if not result.all_reached:
+            for drone in result.drones:
+                self._traces.setdefault(drone.drone_id, []).append(drone.position.tolist())
+
         self._redraw(result)
         self._update_step_label(result)
         self._update_collision_indicator(result)
@@ -271,7 +259,7 @@ class MainWindow(QMainWindow):
         
         if result.all_reached:
             self._playing = False
-            self.run_to_completion = False
+            self._run_to_completion = False
             return
 
         # Run-to-completion termination check:
@@ -283,20 +271,19 @@ class MainWindow(QMainWindow):
 
         # Reschedule AFTER current tick completes — prevents event accumulation (locked decision)
         QTimer.singleShot(self._interval_ms, self._tick)
-       
+
     def _toggle_reference_elements(self) -> None:
         self._show_reference_elements = self._btn_reference.isChecked()
-    
+
         # Optional visual feedback
         if self._show_reference_elements:
             self._btn_reference.setStyleSheet("color: green; font-weight: bold;")
         else:
             self._btn_reference.setStyleSheet("")
-    
+
         # Redraw immediately
         if self._last_result is not None:
             self._redraw(self._last_result)
-
 
     def _redraw(self, result: StepResult) -> None:
         self._last_result = result
@@ -316,13 +303,7 @@ class MainWindow(QMainWindow):
         draw_room_wireframe(self._ax, room_min, room_max)
 
         draw_obstacles(self._ax, sim_state.obstacles)
-        
-        # Draw reference paths
-        if self._show_reference_elements and result.reference_paths is not None:
-            for drone,path in zip(result.drones, result.reference_paths):
-                path = np.asarray(path)
-                self._ax.plot(path[:, 0], path[:, 1], path[:, 2], linestyle='--', linewidth=1.5, alpha=0.7, color=drone.color)
-                
+
         # Draw drones
         for drone in result.drones:
             pos = drone.position
@@ -332,35 +313,32 @@ class MainWindow(QMainWindow):
                   
             if self._show_reference_elements:
                 # Draw start marker (square marker)
-                s = self._start_positions.get(drone.drone_id)
-                if s is not None:
-                    drone_color = (drone.color if isinstance(drone.color, str) else tuple(drone.color[:3]))
-                    self._ax.scatter([s[0]], [s[1]], [s[2]], s=50, marker='s', c=[drone_color], alpha=0.7, depthshade=False,)
+                drone_color = (drone.color if isinstance(drone.color, str) else tuple(drone.color[:3]))
+                self._ax.scatter([drone.route.start[0]], [drone.route.start[1]], [drone.route.start[2]],
+                                 s=50, marker='s', c=[drone_color], alpha=0.7, depthshade=False)
 
                 # Draw target marker (star marker)
-                t = drone.target
-                self._ax.scatter([t[0]], [t[1]], [t[2]], s=200, marker='X', c=[drone.color] if isinstance(drone.color, str) else [tuple(drone.color[:3])],
-                    depthshade=False, alpha=0.9, label=f"{drone.drone_id} target")
+                self._ax.scatter([drone.route.target[0]], [drone.route.target[1]], [drone.route.target[2]],
+                                 s=200, marker='X', c=[drone.color] if isinstance(drone.color, str) else [tuple(drone.color[:3])], depthshade=False, alpha=0.9, label=f"{drone.drone_id} target")
+
+                # Draw Start to Dest direct Reference Path
+                self._ax.plot(drone.route.start_to_dest_ref_path[:, 0], drone.route.start_to_dest_ref_path[:, 1], drone.route.start_to_dest_ref_path[:, 2],
+                              linestyle='--', linewidth=1.5, alpha=0.7, color=drone.color)
 
             if self._obj_path is not None:
                 self._obj_scale = drone.radius
                 draw_obj_mesh(self._ax, pos, self._obj_path, scale=self._obj_scale, color=color if isinstance(color, str) else "steelblue", alpha=0.8)
             else:
-                self._ax.scatter([pos[0]], [pos[1]], [pos[2]], s=80, c=[color] if isinstance(color, str) else [color], depthshade=False, label=drone.drone_id)
+                self._ax.scatter([pos[0]], [pos[1]], [pos[2]], s=80, c=[color] if isinstance(color, str) else [color],
+                                 depthshade=not self._show_reference_elements, label=drone.drone_id)
                 draw_sphere_wireframe(self._ax, pos, safety_r, color=safety_color, alpha=0.6, lw=0.6)
                 # Ghost sphere: maximum adaptive radius (only when larger than current zone)
-                _draw_ghost_max_sphere(self._ax, drone.adaptive_safety_radius is not None, pos, drone.adaptive_safety_radius, drone.max_adaptive_safety_radius,
-                                       safety_color)
+                _draw_ghost_max_sphere(self._ax, drone.adaptive_safety_radius is not None, pos, drone.adaptive_safety_radius, drone.max_adaptive_safety_radius, safety_color)
 
             trace = self._traces.get(drone.drone_id, [])
             if trace:
                 draw_trace(self._ax, trace, drone.trace_color)
-        
-        # --- Collision markers (persistent black X across all past steps) ---
-        if self._show_reference_elements and result.collision_point is not None:
-            pt = np.asarray(result.collision_point)
-            self._ax.scatter([pt[0]], [pt[1]], [pt[2]], s=50, marker='X', c='black', linewidths=2.5, depthshade=False, zorder=5,)
-            
+
         # BoF prediction tubes (one per drone with a fresh prediction this step).
         # Outer = post-processed safety radius (barely visible halo).
         # Inner = drone body radius (slightly more present, with centerline).
@@ -456,41 +434,35 @@ class MainWindow(QMainWindow):
 
         draw_room_wireframe(ax, sim_state.room_min, sim_state.room_max)
         draw_obstacles(ax, sim_state.obstacles)
-        
-        # Draw reference paths
-        if self._show_reference_elements and result.reference_paths is not None:
-            for drone, path in zip(result.drones, result.reference_paths):
-                path = np.asarray(path)
-                ax.plot(path[:, 0], path[:, 1], path[:, 2], linestyle='--', linewidth=1.5, alpha=0.7, color=drone.color)
 
         for drone in result.drones:
             pos = drone.position
             color = drone.color
             safety_r = (drone.adaptive_safety_radius if drone.adaptive_safety_radius is not None else drone.safety_zone)
             safety_color = drone.safety_color
-            
+
             if self._show_reference_elements:
+                drone_color = (drone.color if isinstance(drone.color, str) else tuple(drone.color[:3])) # why?
                 # Draw start marker
-                s = self._start_positions.get(drone.drone_id)
-                if s is not None:
-                    drone_color = (drone.color if isinstance(drone.color, str) else tuple(drone.color[:3]))
-                    ax.scatter([s[0]], [s[1]], [s[2]], s=50, marker='s', c=[drone_color], alpha=0.7, depthshade=False, )
-                    
+                ax.scatter([drone.route.start[0]], [drone.route.start[1]], [drone.route.start[2]],
+                           s=50, marker='s', c=[drone_color], alpha=0.7, depthshade=False)
+
                 # Draw target marker
-                t = drone.target
-                ax.scatter([t[0]], [t[1]], [t[2]], s=200, marker='X', c=[drone.color] if isinstance(drone.color, str) else [tuple(drone.color[:3])], depthshade=False, alpha=0.9, label=f"{drone.drone_id} target")    
-                
-                # Collision point marker
-                if result.collision_point is not None:
-                    pt = np.asarray(result.collision_point)
-                    ax.scatter([pt[0]], [pt[1]], [pt[2]], s=50, marker='X', c='black', linewidths=2.5, depthshade=False, zorder=5, )
-                    
+                ax.scatter([drone.route.target[0]], [drone.route.target[1]], [drone.route.target[2]],
+                           s=200, marker='X', c=[drone.color] if isinstance(drone.color, str) else [tuple(drone.color[:3])],
+                           depthshade=False, alpha=0.9, label=f"{drone.drone_id} target")
+
+                # Draw reference paths
+                ax.plot(drone.route.start_to_dest_ref_path[:, 0], drone.route.start_to_dest_ref_path[:, 1], drone.route.start_to_dest_ref_path[:, 2],
+                        linestyle='--', linewidth=1.5, alpha=0.7, color=drone.color)
+
             if self._obj_path is not None:
                 draw_obj_mesh(ax, pos, self._obj_path, scale=drone.radius, color=color if isinstance(color, str) else "steelblue", alpha=0.8)
                 # Invisible scatter for legend entry with drone color
                 ax.scatter([pos[0]], [pos[1]], [pos[2]], s=40, c=[color] if isinstance(color, str) else [color], alpha=0.0, label=drone.drone_id)
             else:
-                ax.scatter([pos[0]], [pos[1]], [pos[2]], s=80, c=[color] if isinstance(color, str) else [color], depthshade=True, label=drone.drone_id)
+                ax.scatter([pos[0]], [pos[1]], [pos[2]], s=80, c=[color] if isinstance(color, str) else [color],
+                           depthshade=not self._show_reference_elements, label=drone.drone_id)
                 draw_sphere_wireframe(ax, pos, safety_r, color=safety_color, alpha=0.6, lw=0.6)
                 _draw_ghost_max_sphere(ax, drone.adaptive_safety_radius is not None, pos, drone.adaptive_safety_radius, drone.max_adaptive_safety_radius, safety_color)
 
