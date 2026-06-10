@@ -134,6 +134,33 @@ class TestSimulatorStep:
                break
          assert moved
 
+   def test_step_records_last_controls(self):
+      """A feasible step mirrors the applied first-step controls into last_controls."""
+      cfg = ScenarioConfig(
+         dt=0.1,
+         physics=PhysicsSpec(type="linear_kinematics"),
+         controller=ControllerSpec(type="mpc_agent"),
+         coordinator=ControllerSpec(type="mpc_central"),
+         drones=[
+            DroneConfig(drone_id="d1", start=[0, 0, 5], target=[5, 0, 5]),
+            DroneConfig(drone_id="d2", start=[5, 0, 5], target=[0, 0, 5]),
+         ],
+         room=RoomConfig(min=[-10, -10, 0], max=[10, 10, 10]),
+      )
+      sim = Simulator.from_config(cfg)
+      assert sim.last_controls == {}  # empty before the first step
+
+      sim.step()
+      if sim.infeasible:
+         pytest.skip("step was infeasible; nothing applied")
+
+      # One finite (3,) control per drone, keyed by drone_id.
+      assert set(sim.last_controls) == {"d1", "d2"}
+      for did, u in sim.last_controls.items():
+         u = np.asarray(u)
+         assert u.shape == (3,)
+         assert np.all(np.isfinite(u))
+
    def test_step_increase_values_only_if_feasible(self, sample_simulator: Simulator):
       """Test step appends to drone traces, step counter and dt when step succeeds."""
       initial_trace_len = len(sample_simulator.traces[sample_simulator.drones[0].drone_id])

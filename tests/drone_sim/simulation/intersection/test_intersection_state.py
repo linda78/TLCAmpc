@@ -320,6 +320,44 @@ def test_state_store_does_not_release_rehung_waiter():
    assert b.waiting_for == "x"
 
 
+def test_state_store_releases_orphaned_waiter_when_target_idles():
+   """Liveness: a waiter whose target is no active sphere priority/root is freed.
+
+   Regression for the sequencing deadlock where a rehung waiter (b waiting on x)
+   was never released after x's sphere dropped — x reached its goal and went
+   idle, so b waited forever. The orphan sweep must release b once no active
+   sphere sequences x.
+   """
+   store = IntersectionStateStore(radius=1.2, margin=1.1)
+   a = _gated("a", np.array([0.0, 0.0, 0.0]))
+   b = _gated("b", np.array([3.0, 0.0, 0.0]))
+   x = _plain("x", np.array([6.0, 0.0, 0.0]))
+
+   # Step 1: (a, b) — a wins, b parks on a.
+   ev_ab = _event(("a", "b"), ttc_a=0.5, ttc_b=3.0,
+                   detection_point=np.array([0.0, 0.0, 0.0]))
+   store.step([ev_ab], [a, b, x], threshold=1.0)
+
+   # Step 2: (a, x) — Type-Veto parks a on x and rehangs b onto x; (a,b) drops.
+   # The (a,x) sphere is centered at x's position so its priority x counts as
+   # having entered the zone immediately.
+   a.x[:3] = np.array([10.0, 0.0, 0.0])
+   ev_ax = _event(("a", "x"), ttc_a=3.0, ttc_b=0.5,
+                   detection_point=np.array([6.0, 0.0, 0.0]))
+   store.step([ev_ax], [a, b, x], threshold=1.0)
+   assert b.waiting_for == "x" and b.is_waiting
+
+   # Step 3: x exits its sphere → (a,x) drops and releases the direct loser a.
+   # b was rehung onto x and is not a member of the (a,x) pair, so the normal
+   # release skips it. No sphere references x anymore, so the orphan sweep must
+   # free b. Without the fix b would wait on idle x forever (deadlock).
+   x.x[:3] = np.array([20.0, 0.0, 0.0])
+   active = store.step([], [a, b, x], threshold=1.0)
+   assert active == {}
+   assert b.is_waiting is False and b.wait_state == "free"
+   assert a.is_waiting is False
+
+
 # ---------- apply_deadlock_dominance (D1, unchanged) ------------------------
 
 

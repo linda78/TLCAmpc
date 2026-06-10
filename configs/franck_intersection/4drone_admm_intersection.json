@@ -38,7 +38,7 @@
       "cons_stop": 0.0,
       "drone_color": "#00FFFF",
       "physics": "default",
-      "safety_zone_mode": "lstm"
+      "safety_zone_mode": "fixed"
     },
     {
       "drone_id": "drone-2",

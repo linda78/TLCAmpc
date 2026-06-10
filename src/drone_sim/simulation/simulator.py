@@ -56,6 +56,12 @@ class Simulator:
    # Each entry represents an intruder intersecting a drone's safety sphere.
    last_collisions: list[dict] = field(default_factory=list)
 
+   # Applied first-step control per drone for the *current* step, keyed by
+   # drone_id. Mirrors the controls actually applied in step() so callers can
+   # measure control energy (sum ||u||^2 dt) without re-deriving from velocity
+   # differences (which the wall-clamp would corrupt). Empty before the first step.
+   last_controls: dict[str, np.ndarray] = field(default_factory=dict)
+
    t: float = 0.0
 
    # Step counter (integer ticks).
@@ -98,17 +104,18 @@ class Simulator:
             coord_params["comm_radius"] = cfg.comm_radius
          coordinator = create_coordinator({"type": cfg.coordinator.type, "params": coord_params})
 
-      # GatedDrone needs the IntersectionDMPCCoordinator to flip its
+      # GatedDrone needs an intersection-capable coordinator to flip its
       # wait-state. Warn (don't raise) so misconfigured runs are loud
       # but not blocked.
       has_gated = any(d.type == "gated" for d in cfg.drones)
       if has_gated and coordinator is not None:
-         from drone_sim.simulation.intersection.intersection_dmpc_coordinator import (
-            IntersectionDMPCCoordinator,
+         from drone_sim.simulation.intersection.intersection_mixin import (
+            IntersectionMixin,
          )
-         if not isinstance(coordinator, IntersectionDMPCCoordinator):
+         if not isinstance(coordinator, IntersectionMixin):
             warnings.warn(
-               "GatedDrone is only effective with IntersectionDMPCCoordinator — "
+               "GatedDrone is only effective with an intersection coordinator "
+               "(dmpc_admm_intersection / mpc_central_intersection) — "
                f"current coordinator is {type(coordinator).__name__}. "
                "Wait-state will be set but never honored.",
                RuntimeWarning, stacklevel=2,
@@ -343,6 +350,9 @@ class Simulator:
                self._bof_history.update(d.drone_id, d.x.copy())
 
          self.last_collisions = self._compute_collisions()
+         # Mirror the applied controls (aligned with self.drones order) so
+         # callers can accumulate control energy for this step.
+         self.last_controls = {d.drone_id: u for d, u in zip(self.drones, us, strict=True)}
 
          # Diagnostic: real (not predicted) pairwise distances + wait-state.
          if _log.isEnabledFor(logging.INFO):

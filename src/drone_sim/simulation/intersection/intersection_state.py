@@ -141,6 +141,27 @@ class IntersectionStateStore:
             self._release_losers(record, drones, drones_by_id)
             del self._active[pair]
 
+      # Liveness safeguard: enforce the invariant "a drone waits only while some
+      # active sphere sequences the drone it waits for". A waiter is orphaned when
+      # its wait target (priority/root) belongs to no active sphere — e.g. the
+      # sphere dropped without a matching release after a rehang, or the target
+      # reached its goal and went idle. Such a waiter would never be released
+      # (its target never re-enters a sphere), so we release it here. A waiter
+      # whose target is still an active priority/root stays parked (it is
+      # transitively behind a sphere via the wait chain).
+      active_roots: set[str] = set()
+      for record in self._active.values():
+         if record.priority is not None:
+            active_roots.add(record.priority)
+         if record.priority_root is not None:
+            active_roots.add(record.priority_root)
+      for drone in drones:
+         if isinstance(drone, GatedDrone) and drone.is_waiting and drone.waiting_for not in active_roots:
+            _log.info("IntersectionStateStore: ORPHAN release %s (wait target %s is no active sphere priority/root)", drone.drone_id, drone.waiting_for)
+            if drone.is_stopping:
+               drone.transition_to_parked()
+            drone.stop_waiting()
+
       return self.active_pairs()
 
    def _park_loser(self, loser_id: str, priority_root: str, drones: Sequence[Drone], drones_by_id: dict[str, Drone]) -> None:

@@ -6,9 +6,13 @@ loser is parked via :meth:`GatedDrone.start_waiting` until the priority
 drone has passed through.
 """
 
+from drone_sim.simulation.intersection.intersection_central_coordinator import (
+   IntersectionCentralCoordinator,
+)
 from drone_sim.simulation.intersection.intersection_dmpc_coordinator import (
    IntersectionDMPCCoordinator,
 )
+from drone_sim.simulation.intersection.intersection_mixin import IntersectionMixin
 from drone_sim.simulation.intersection.intersection_state import (
    IntersectionStateStore,
    SphereRecord,
@@ -23,8 +27,10 @@ from drone_sim.simulation.utils.stateless_conflict_detection import (
 )
 
 __all__ = [
+   "IntersectionCentralCoordinator",
    "IntersectionDMPCCoordinator",
    "IntersectionEvent",
+   "IntersectionMixin",
    "IntersectionStateStore",
    "SphereRecord",
    "closest_approach",
