@@ -436,3 +436,87 @@ class TestScenarioConfigBoF:
             drones=[self._drone()],
             bof_growth_tau=-1.0,
          )
+
+
+class TestScenarioConfigCamera:
+   """Tests for the camera-related ScenarioConfig fields and validator."""
+
+   def _drone(self):
+      return DroneConfig(drone_id="d1", start=[0.0, 0.0, 0.0], target=[5.0, 5.0, 5.0])
+
+   def _cfg(self, **kwargs):
+      return ScenarioConfig(
+         physics=PhysicsSpec(type="linear_kinematics"),
+         controller=ControllerSpec(type="mpc_agent"),
+         drones=[self._drone()],
+         **kwargs,
+      )
+
+   def test_defaults(self):
+      cfg = self._cfg()
+      assert cfg.camera_enabled is False
+      assert cfg.camera_fov_deg == 90.0
+      assert cfg.camera_range == 10.0
+      assert cfg.camera_backend == "stub"
+      assert cfg.camera_url is None
+      assert cfg.camera_noise_sigma == 0.0
+      assert cfg.camera_rate_steps == 1
+      assert cfg.camera_render_images is False
+      assert cfg.camera_async is True
+      assert cfg.camera_feeds_dmpc is False
+
+   def test_rest_backend_requires_url(self):
+      with pytest.raises(ValidationError, match="camera_url"):
+         self._cfg(camera_enabled=True, camera_backend="rest")
+
+   def test_rest_backend_with_url_ok(self):
+      cfg = self._cfg(
+         camera_enabled=True,
+         camera_backend="rest",
+         camera_url="http://localhost:5006",
+      )
+      assert cfg.camera_url == "http://localhost:5006"
+
+   def test_stub_backend_does_not_require_url(self):
+      cfg = self._cfg(camera_enabled=True, camera_backend="stub")
+      assert cfg.camera_url is None
+
+   def test_invalid_backend_raises(self):
+      with pytest.raises(ValidationError):
+         self._cfg(camera_backend="grpc")  # type: ignore[arg-type]
+
+   def test_fov_bounds(self):
+      with pytest.raises(ValidationError, match="camera_fov_deg"):
+         self._cfg(camera_fov_deg=0.0)
+      with pytest.raises(ValidationError, match="camera_fov_deg"):
+         self._cfg(camera_fov_deg=361.0)
+      cfg = self._cfg(camera_fov_deg=360.0)
+      assert cfg.camera_fov_deg == 360.0
+
+   def test_range_must_be_positive(self):
+      with pytest.raises(ValidationError, match="camera_range"):
+         self._cfg(camera_range=0.0)
+      with pytest.raises(ValidationError, match="camera_range"):
+         self._cfg(camera_range=-1.0)
+
+   def test_rate_steps_must_be_at_least_one(self):
+      with pytest.raises(ValidationError, match="camera_rate_steps"):
+         self._cfg(camera_rate_steps=0)
+
+   def test_noise_sigma_must_be_nonnegative(self):
+      with pytest.raises(ValidationError, match="camera_noise_sigma"):
+         self._cfg(camera_noise_sigma=-0.1)
+      cfg = self._cfg(camera_noise_sigma=0.0)
+      assert cfg.camera_noise_sigma == 0.0
+
+   def test_feeds_dmpc_requires_enabled(self):
+      with pytest.raises(ValidationError, match="camera_feeds_dmpc"):
+         self._cfg(camera_feeds_dmpc=True)
+      cfg = self._cfg(camera_enabled=True, camera_feeds_dmpc=True)
+      assert cfg.camera_feeds_dmpc is True
+
+   def test_render_images_requires_enabled(self):
+      with pytest.raises(ValidationError, match="camera_render_images"):
+         self._cfg(camera_render_images=True)
+      cfg = self._cfg(camera_enabled=True, camera_render_images=True)
+      assert cfg.camera_render_images is True

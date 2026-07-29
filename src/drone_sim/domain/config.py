@@ -151,6 +151,50 @@ class ScenarioConfig(BaseModel):
    # faster growth (tau≈horizon/4 for visibly cone-shaped tubes).
    bof_growth_tau: float | None = None
 
+   # Enable the camera perception pipeline (View → capture → external
+   # predictor → PerceptionMailbox). When False (default) no captures are
+   # taken and the simulator behaves exactly as before — all camera_* fields
+   # below are validated but otherwise inert until the simulator wiring lands.
+   camera_enabled: bool = False
+
+   # Horizontal field of view of the simulated camera in degrees. Neighbors
+   # outside the FOV cone are not observed. Must be in (0, 360].
+   camera_fov_deg: float = 90.0
+
+   # Maximum sensing distance in meters. Neighbors farther away than this
+   # are not observed regardless of FOV. Must be positive.
+   camera_range: float = 10.0
+
+   # Which capture backend to use. "stub" synthesizes detections in-process
+   # from true sim state (default — no network IO). "rest" POSTs each capture
+   # to an external predictor service at ``camera_url``.
+   camera_backend: Literal["stub", "rest"] = "stub"
+
+   # Endpoint base URL for the REST backend, e.g. "http://localhost:5006".
+   # Required when ``camera_backend == "rest"``.
+   camera_url: str | None = None
+
+   # Standard deviation of Gaussian position noise added to observed
+   # neighbor positions (meters). 0.0 (default) = perfect observations.
+   camera_noise_sigma: float = 0.0
+
+   # Capture cadence: one capture every N sim steps. 1 (default) captures
+   # every step; larger values model slower camera/predictor rates.
+   camera_rate_steps: int = 1
+
+   # When True, render a pseudo-FPV PNG per capture and attach it to the
+   # View for debugging/visualization. Requires ``camera_enabled``.
+   camera_render_images: bool = False
+
+   # When True (default), captures are processed asynchronously off the MPC
+   # hot path. Set False to run inline for deterministic tests.
+   camera_async: bool = True
+
+   # When True, the DMPC neighbor mailbox is fed from camera perception
+   # instead of true-state communication broadcasts. Default False keeps the
+   # mailbox fed from broadcasts as before. Requires ``camera_enabled``.
+   camera_feeds_dmpc: bool = False
+
    @model_validator(mode="after")
    def _validate_bof(self) -> ScenarioConfig:
       if self.bof_backend == "rest" and not self.bof_url:
@@ -161,4 +205,22 @@ class ScenarioConfig(BaseModel):
          raise ValueError("bof_horizon must be positive")
       if self.bof_growth_tau is not None and self.bof_growth_tau <= 0:
          raise ValueError("bof_growth_tau must be positive when set")
+      return self
+
+   @model_validator(mode="after")
+   def _validate_camera(self) -> ScenarioConfig:
+      if self.camera_backend == "rest" and not self.camera_url:
+         raise ValueError("camera_url must be set when camera_backend='rest'")
+      if not 0 < self.camera_fov_deg <= 360:
+         raise ValueError("camera_fov_deg must be in (0, 360]")
+      if self.camera_range <= 0:
+         raise ValueError("camera_range must be positive")
+      if self.camera_rate_steps < 1:
+         raise ValueError("camera_rate_steps must be at least 1")
+      if self.camera_noise_sigma < 0:
+         raise ValueError("camera_noise_sigma must be non-negative")
+      if self.camera_feeds_dmpc and not self.camera_enabled:
+         raise ValueError("camera_feeds_dmpc requires camera_enabled")
+      if self.camera_render_images and not self.camera_enabled:
+         raise ValueError("camera_render_images requires camera_enabled")
       return self
