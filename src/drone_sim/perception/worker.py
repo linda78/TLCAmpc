@@ -81,9 +81,10 @@ class PerceptionWorker:
 
       # Depth 1 on purpose: the queue is a hand-over slot, not a buffer. See the module docstring on drop-oldest.
       self._queue: queue.Queue[list[CameraView]] = queue.Queue(maxsize=1)
+      # One flag for one state: the worker thread polls it to leave its loop, start()/submit() read it to
+      # refuse work after a shutdown. Set in synchronous mode too, where there is no thread to notice it.
       self._stop_event = threading.Event()
       self._thread: threading.Thread | None = None
-      self._stopped = False
 
       _log.info("PerceptionWorker ready: async=%s sinks=%s renderer=%s", self._async_mode,
                 "+".join(name for name, sink in (("adapter", adapter), ("view_store", view_store)) if sink is not None),
@@ -107,7 +108,7 @@ class PerceptionWorker:
       """
       if not self._async_mode:
          return
-      if self._stopped:
+      if self._stop_event.is_set():
          raise RuntimeError("PerceptionWorker.start() after stop(): a stopped worker is not restartable, build a new one")
       if self._thread is not None:
          return
@@ -130,7 +131,7 @@ class PerceptionWorker:
       if not views:
          return
 
-      if self._stopped:
+      if self._stop_event.is_set():
          _log.debug("Perception submit after stop: %d views discarded", len(views))
          return
 
@@ -154,11 +155,10 @@ class PerceptionWorker:
 
       :param timeout: Seconds to wait for the thread to finish.
       """
-      self._stopped = True
+      self._stop_event.set()
       if not self._async_mode or self._thread is None:
          return
 
-      self._stop_event.set()
       self._thread.join(timeout=timeout)
       if self._thread.is_alive():
          _log.warning("PerceptionWorker thread still running after %.1f s — a detector call is likely still blocked; it is a daemon thread and will "

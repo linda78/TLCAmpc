@@ -566,8 +566,8 @@ class TestThreadedCoordinatorPerceptionMode:
         assert coordinator.get_last_converged() is True
 
     def test_empty_field_of_view_does_not_burn_the_timeout(self):
-        """Test R6: without allow_empty_inbox a blind drone never solves, traj_prev stays None, and the
-        convergence poll spends the whole convergence_timeout_sec — every single simulation step.
+        """Test R6: without the empty-inbox half of perception_mode a blind drone never solves, traj_prev stays
+        None, and the convergence poll spends the whole convergence_timeout_sec — every single simulation step.
 
         The bound is generous but finite on purpose: this pins the regression instead of hanging the suite.
         """
@@ -601,7 +601,7 @@ class TestThreadedCoordinatorPerceptionMode:
         assert coordinator.get_last_converged() is True
 
     def test_solvers_are_configured_for_perception(self, monkeypatch):
-        """Test the two AsyncLocalSolver switches are actually flipped — they are what R6 hinges on."""
+        """Test the AsyncLocalSolver switch is actually flipped — it is what R6 hinges on."""
         built: list[dict] = []
         original = threaded_coordinator.AsyncLocalSolver
 
@@ -615,8 +615,7 @@ class TestThreadedCoordinatorPerceptionMode:
         coordinator.solve_controls(drones=self._drones(), obstacles=[],
                                    perception_mailbox=_perception({"drone-1": {"drone-2": (5.0, 0.0, 0.0)}}))
 
-        assert built and all(kwargs["broadcast_enabled"] is False for kwargs in built)
-        assert all(kwargs["allow_empty_inbox"] is True for kwargs in built)
+        assert built and all(kwargs["perception_mode"] is True for kwargs in built)
 
 
 class TestThreadedCoordinatorPerceptionRegression:
@@ -642,7 +641,7 @@ class TestThreadedCoordinatorPerceptionRegression:
         assert set(result) == {"drone-1", "drone-2"}
 
     def test_default_solvers_keep_broadcasting_and_skip_empty_inboxes(self, monkeypatch):
-        """Test the two new AsyncLocalSolver switches keep their backwards-compatible defaults."""
+        """Test the new AsyncLocalSolver switch keeps its backwards-compatible default."""
         built: list[dict] = []
         original = threaded_coordinator.AsyncLocalSolver
 
@@ -655,5 +654,4 @@ class TestThreadedCoordinatorPerceptionRegression:
 
         coordinator.solve_controls(drones=self._drones(), obstacles=[])
 
-        assert built and all(kwargs["broadcast_enabled"] is True for kwargs in built)
-        assert all(kwargs["allow_empty_inbox"] is False for kwargs in built)
+        assert built and all(kwargs["perception_mode"] is False for kwargs in built)

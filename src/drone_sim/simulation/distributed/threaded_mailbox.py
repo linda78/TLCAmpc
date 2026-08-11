@@ -8,6 +8,7 @@ Supports non-blocking read, non-blocking post, and blocking wait-for-update.
 from __future__ import annotations
 
 import threading
+from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -47,23 +48,7 @@ class ThreadSafeMailbox:
         :param message: TrajectoryMessage to broadcast
         :param neighbor_ids: Set of neighbor drone IDs to receive message
         """
-        conditions_to_notify = []
-
-        with self._lock:
-            for neighbor_id in neighbor_ids:
-                # Post message to neighbor's inbox (latest overwrites previous)
-                if neighbor_id not in self._inboxes:
-                    self._inboxes[neighbor_id] = {}
-                self._inboxes[neighbor_id][sender_id] = message
-
-                # Collect conditions to notify (but don't notify under lock)
-                if neighbor_id in self._conditions:
-                    conditions_to_notify.append(self._conditions[neighbor_id])
-
-        # Notify OUTSIDE the main lock to avoid deadlock
-        for condition in conditions_to_notify:
-            with condition:
-                condition.notify_all()
+        self._post(sender_id, message, neighbor_ids)
 
     def deliver(self, receiver_id: str, message: TrajectoryMessage) -> None:
         """Deliver one message directly into a single drone's inbox, bypassing the NeighborGraph (non-blocking).
@@ -80,16 +65,37 @@ class ThreadSafeMailbox:
         :param receiver_id: ID of the receiving drone
         :param message: TrajectoryMessage to file under its own ``drone_id``
         """
-        with self._lock:
-            if receiver_id not in self._inboxes:
-                self._inboxes[receiver_id] = {}
-            self._inboxes[receiver_id][message.drone_id] = message
+        # A one-recipient post in which the sender is the observed drone itself. It goes through the
+        # same primitive as broadcast() rather than through broadcast() itself, so that the two stay
+        # distinguishable to anyone watching the public methods -- which is the negotiation-versus-
+        # observation distinction this class is asked about.
+        self._post(message.drone_id, message, (receiver_id,))
 
-            # Collect the condition under the lock, notify outside it (same lock hierarchy as broadcast)
-            condition = self._conditions.get(receiver_id)
+    def _post(self, sender_id: str, message: TrajectoryMessage, receiver_ids: Iterable[str]) -> None:
+        """File one message into every named inbox and wake whoever waits on them.
+
+        The single place that touches ``_inboxes`` and ``_conditions`` together, and therefore the
+        single place that has to honour the lock hierarchy of this class: collect the conditions
+        while holding ``_lock``, notify after releasing it.
+
+        :param sender_id: Key the message is filed under in each inbox; the latest overwrites the previous.
+        :param message: TrajectoryMessage to file
+        :param receiver_ids: Inboxes to file it into
+        """
+        conditions_to_notify = []
+
+        with self._lock:
+            for receiver_id in receiver_ids:
+                if receiver_id not in self._inboxes:
+                    self._inboxes[receiver_id] = {}
+                self._inboxes[receiver_id][sender_id] = message
+
+                # Collect conditions to notify (but don't notify under lock)
+                if receiver_id in self._conditions:
+                    conditions_to_notify.append(self._conditions[receiver_id])
 
         # Notify OUTSIDE the main lock to avoid deadlock
-        if condition is not None:
+        for condition in conditions_to_notify:
             with condition:
                 condition.notify_all()
 

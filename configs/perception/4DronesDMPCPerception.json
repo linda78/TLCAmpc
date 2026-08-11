@@ -32,6 +32,8 @@
   "camera_noise_sigma": 0.02,
   "camera_async": true,
   "camera_feeds_dmpc": true,
+  "drone_model": "obj",
+  "drone_model_path": "drone_costum_0_0_5.obj",
 
   "drones": [
     {
@@ -42,9 +44,7 @@
       "safety_zone": 1.0,
       "cons_stop": 0.0,
       "drone_color": "#00FFFF",
-      "physics": "default",
-      "drone_model": "obj",
-      "drone_model_path": "drone_costum_0_0_5.obj"
+      "physics": "default"
     },
     {
       "drone_id": "drone-2",
@@ -54,9 +54,7 @@
       "safety_zone": 1.0,
       "cons_stop": 0.0,
       "drone_color": "#800080",
-      "physics": "default",
-      "drone_model": "obj",
-      "drone_model_path": "drone_costum_0_0_5.obj"
+      "physics": "default"
     },
     {
       "drone_id": "drone-3",
@@ -66,9 +64,7 @@
       "safety_zone": 1.0,
       "cons_stop": 0.0,
       "drone_color": "#DC143C",
-      "physics": "default",
-      "drone_model": "obj",
-      "drone_model_path": "drone_costum_0_0_5.obj"
+      "physics": "default"
     },
     {
       "drone_id": "drone-4",
@@ -78,9 +74,7 @@
       "safety_zone": 1.0,
       "cons_stop": 0.0,
       "drone_color": "#008B8B",
-      "physics": "default",
-      "drone_model": "obj",
-      "drone_model_path": "drone_costum_0_0_5.obj"
+      "physics": "default"
     }
   ]
 }

@@ -12,7 +12,7 @@ from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
 from drone_sim.domain.drone_model import DroneModel, resolve_drone_model
-from drone_sim.gui.backend import StepResult, SimState
+from drone_sim.gui.backend import DroneState, StepResult, SimState
 from drone_sim.gui.direct_backend import DirectBackend
 from drone_sim.api.utils.render_helper import draw_room_wireframe, draw_sphere_wireframe, draw_trace, draw_obstacles, draw_obj_mesh, draw_prediction_tube
 
@@ -55,10 +55,11 @@ class MainWindow(QMainWindow):
         self._traces: dict[str, list[list[float]]] = {}
         self._zoom: float = 1.0  # <1 zoomed in, >1 zoomed out; applied to room limits
         self._run_to_completion: bool = False
-        # GUI-side mirror of the backend's fleet-wide model override — the external view draws straight from it,
-        # the drone view goes through the backend. None = no override, i.e. whatever the scenario configured.
-        self._obj_path: Path | None = None  # path to .obj file for 3D drone model
-        self._obj_scale: float = 0.3  # scale of the OBJ model in world units
+        # Fleet-wide display override picked at runtime via the OBJ Model button; None = draw each drone as its
+        # scenario configured it. Mirrors what the backend was told, because the 3D views render here.
+        self._model_override: DroneModel | None = None
+        # Which view was last painted: a drone id for an FPV view, None for the external 3D scene.
+        self._shown_view: str | None = None
         self._last_result: StepResult | None = None
         # Recording state (live MP4/GIF capture of the canvas)
         self._recording: bool = False
@@ -269,7 +270,16 @@ class MainWindow(QMainWindow):
         if fpv_id is not None and self._recording:
             self._stop_recording()
         self._btn_record.setEnabled(fpv_id is None)
+
         self._view_stack.setCurrentWidget(self._canvas if fpv_id is None else self._fpv_label)
+
+        # Only an actual change of view needs a repaint, and the *drone* is what changes — two drone views
+        # share one widget. Refilling the combo on a config load re-selects the external view that is already
+        # showing, and would otherwise rebuild the whole 3D scene a second time against the frame that
+        # _on_open_file just drew.
+        if fpv_id == self._shown_view:
+            return
+        self._shown_view = fpv_id
         if self._last_result is not None:
             self._redraw(self._last_result)
 
@@ -351,9 +361,9 @@ class MainWindow(QMainWindow):
             safety_r = (drone.adaptive_safety_radius if drone.adaptive_safety_radius is not None else drone.safety_zone)
             safety_color = drone.safety_color
 
-            if self._obj_path is not None:
-                self._obj_scale = drone.radius
-                draw_obj_mesh(self._ax, pos, self._obj_path, scale=self._obj_scale, color=color if isinstance(color, str) else "steelblue", alpha=0.8)
+            mesh_path = self._drone_mesh_path(drone)
+            if mesh_path is not None:
+                draw_obj_mesh(self._ax, pos, mesh_path, scale=drone.radius, color=color if isinstance(color, str) else "steelblue", alpha=0.8)
             else:
                 self._ax.scatter([pos[0]], [pos[1]], [pos[2]], s=80, c=[color] if isinstance(color, str) else [color], depthshade=True, label=drone.drone_id)
                 draw_sphere_wireframe(self._ax, pos, safety_r, color=safety_color, alpha=0.6, lw=0.6)
@@ -469,7 +479,7 @@ class MainWindow(QMainWindow):
         self._apply_drone_model_override(model)
 
     def _apply_drone_model_override(self, model: DroneModel | None) -> None:
-        """Push the override to the backend, update the GUI's own copy, and repaint whichever view is showing.
+        """Push the override to the backend, keep the GUI's own copy, and repaint whichever view is showing.
 
         Repainting via ``_redraw`` rather than ``draw_idle`` is what makes the change visible immediately in
         *both* views: ``draw_idle`` only re-renders the artists already on the 3D canvas, and would not touch
@@ -483,9 +493,19 @@ class MainWindow(QMainWindow):
             self._canvas.draw_idle()
 
     def _show_drone_model_override(self, model: DroneModel | None) -> None:
-        """Update the GUI-side copy of the override (path for the external view, label for the user). No repaint."""
-        self._obj_path = model.path if model is not None else None
-        self._obj_model_label.setText(f"Model: {self._obj_path.stem}" if self._obj_path is not None else "Model: scatter")
+        """Store the override and name it in the toolbar label. No repaint."""
+        self._model_override = model
+        self._obj_model_label.setText(f"Model: {model.path.stem}" if model is not None and model.path is not None else "Model: scatter")
+
+    def _drone_mesh_path(self, drone: DroneState) -> Path | None:
+        """Mesh ``drone`` is drawn with in the 3D views, or ``None`` when it is drawn as a sphere.
+
+        The runtime override wins for the whole fleet; otherwise each drone uses what its scenario configured.
+        That is the same rule ``DirectBackend._display_models`` applies to the FPV render, which is why the two
+        views no longer disagree about a scenario that sets ``drone_model``.
+        """
+        model = self._model_override if self._model_override is not None else drone.model
+        return model.path if model is not None and model.kind == "obj" else None
 
     # ------------------------------------------------------------------ #
     # Screenshot                                                           #
@@ -520,8 +540,9 @@ class MainWindow(QMainWindow):
             safety_r = (drone.adaptive_safety_radius if drone.adaptive_safety_radius is not None else drone.safety_zone)
             safety_color = drone.safety_color
 
-            if self._obj_path is not None:
-                draw_obj_mesh(ax, pos, self._obj_path, scale=drone.radius, color=color if isinstance(color, str) else "steelblue", alpha=0.8)
+            mesh_path = self._drone_mesh_path(drone)
+            if mesh_path is not None:
+                draw_obj_mesh(ax, pos, mesh_path, scale=drone.radius, color=color if isinstance(color, str) else "steelblue", alpha=0.8)
                 # Invisible scatter for legend entry with drone color
                 ax.scatter([pos[0]], [pos[1]], [pos[2]], s=40, c=[color] if isinstance(color, str) else [color], alpha=0.0, label=drone.drone_id)
             else:
@@ -582,11 +603,7 @@ class MainWindow(QMainWindow):
         fig.text(0.98, 0.02, f"t = {result.t:.2f} s (step {result.step_count})", fontsize=9, ha="right", va="bottom")
 
         # Save
-        out_dir = Path("screenshots")
-        out_dir.mkdir(exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{scenario_name}_{result.step_count}_{timestamp}.png"
-        path = out_dir / filename
+        path = self._screenshot_path(scenario_name, result)
         fig.savefig(str(path), dpi=150, bbox_inches="tight")
 
         # Save data snapshot for later re-rendering
@@ -635,13 +652,23 @@ class MainWindow(QMainWindow):
 
         sim_state = self._backend.get_state()
         scenario_name = Path(sim_state.config_path).stem if sim_state.config_path else "unknown"
-        out_dir = Path("screenshots")
-        out_dir.mkdir(exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        path = out_dir / f"{scenario_name}_fpv_{drone_id}_{result.step_count}_{timestamp}.png"
+        path = self._screenshot_path(scenario_name, result, tag=f"fpv_{drone_id}")
         path.write_bytes(png)
 
         self._step_label.setText(f"Saved: {path.name}")
+
+    @staticmethod
+    def _screenshot_path(scenario_name: str, result: StepResult, tag: str = "") -> Path:
+        """Destination for one screenshot: ``screenshots/<scenario>[_<tag>]_<step>_<timestamp>.png``.
+
+        Shared by the 3D and the FPV path so both kinds of screenshot land in one directory under one naming
+        rule; the directory is created here because that is the only place that knows where they go.
+        """
+        out_dir = Path("screenshots")
+        out_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        parts = [scenario_name, tag, str(result.step_count), timestamp]
+        return out_dir / f"{'_'.join(p for p in parts if p)}.png"
 
     # ------------------------------------------------------------------ #
     # Video recording                                                    #

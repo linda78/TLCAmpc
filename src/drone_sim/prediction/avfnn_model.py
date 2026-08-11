@@ -27,6 +27,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from drone_sim.prediction.model import reparameterize
+
 
 class AVFNNModel(nn.Module):
    """Variational feedforward trajectory forecaster.
@@ -101,12 +103,9 @@ class AVFNNModel(nn.Module):
       mu_z = self.mu_z_head(e)                           # (batch, d_z)
       logvar_z = self.logvar_z_head(e)                   # (batch, d_z)
 
-      # Reparameterization trick (sample during training, mean at inference)
-      if self.training:
-         std_z = torch.exp(0.5 * logvar_z)
-         z = mu_z + std_z * torch.randn_like(std_z)
-      else:
-         z = mu_z
+      # Reparameterization trick (sample during training, mean at inference) — shared with AVLSTMModel,
+      # so the ablation compares architectures rather than two sampling rules.
+      z = reparameterize(mu_z, logvar_z, self.training)  # (batch, d_z)
 
       h = self.decoder(z)                                # (batch, dec_hidden)
       mu = self.mu_head(h).reshape(batch, self.T, self.n)

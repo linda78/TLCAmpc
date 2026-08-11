@@ -98,14 +98,14 @@ class ThreadedMPCCoordinator:
         (risk R1). The bridge is called on every ``solve_controls`` for the same reason — those
         stamps expire after ``stale_threshold_sec``.
 
-        The negotiation itself is switched off: solvers run with ``broadcast_enabled=False`` (a
-        camera observation must not be overwritten by a solved trajectory) and
-        ``allow_empty_inbox=True``. The result is one solve per drone against the perception
-        snapshot; afterwards nothing broadcasts, so nothing notifies, so the trajectories sit still
-        and :meth:`_wait_for_convergence` declares convergence on that stability. Without
-        ``allow_empty_inbox`` a drone whose field of view happens to be empty would never solve at
-        all, its ``traj_prev`` would stay ``None``, and the convergence poll would burn the full
-        ``convergence_timeout_sec`` on every simulation step (risk R6).
+        The negotiation itself is switched off: solvers run with ``perception_mode=True``, which
+        both suppresses the re-broadcast (a camera observation must not be overwritten by a solved
+        trajectory) and lets a drone with an empty inbox solve anyway. Each solver is also given
+        ``max_iterations=1``, because with nothing broadcasting there is no later pass that could
+        see different neighbor data. The threads therefore end themselves after one solve, joining
+        them is the completion signal, and ``converged`` is ``True`` by construction — there is
+        nothing to converge to. Without the empty-inbox half, a drone whose field of view happens to
+        be empty would never solve at all and its ``traj_prev`` would stay ``None`` (risk R6).
 
         :param drones: List of Drone objects to optimize
         :param obstacles: Static obstacles as list of (center, half_extents) tuples
@@ -161,12 +161,14 @@ class ThreadedMPCCoordinator:
                 mailbox=mailbox,
                 neighbor_graph=self._neighbor_graph,
                 local_solver=local_solver,
-                max_iterations=self.max_iterations,
+                # One pass is the whole algorithm under perception: nothing broadcasts, so no later pass
+                # could ever see different neighbor data. Saying so up front lets the thread exit after
+                # its solve instead of idling in wait_for_update until shutdown.
+                max_iterations=1 if perception_active else self.max_iterations,
                 convergence_threshold=self.convergence_threshold,
                 u_prev=u_prev,
                 lstm_radii=lstm_radii_by_drone.get(drone.drone_id),
-                broadcast_enabled=not perception_active,
-                allow_empty_inbox=perception_active,
+                perception_mode=perception_active,
             )
             async_solvers[drone.drone_id] = async_solver
 
@@ -191,8 +193,12 @@ class ThreadedMPCCoordinator:
         else:
             self._spawn_parallel(manager, async_solvers, obstacles, room_min, room_max)
 
-        # 7. Wait for convergence or timeout
-        converged = self._wait_for_convergence(
+        # 7. Wait for convergence or timeout. Under perception there is nothing to converge to, and the
+        #    threads end themselves after their single solve — so the join below *is* the completion
+        #    signal. Polling for stability instead would have to observe two identical snapshots first
+        #    (2 x 50 ms) and would then still find every thread parked in its 0.1 s condition wait:
+        #    ~200 ms of main-thread sleeping per simulation step, on a dt of 0.1 s.
+        converged = True if perception_active else self._wait_for_convergence(
             async_solvers,
             timeout_sec=self.convergence_timeout_sec
         )

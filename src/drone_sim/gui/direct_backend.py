@@ -153,7 +153,7 @@ class DirectBackend(SimulationBackend):
          drone_states.append(DroneState(drone_id=d.drone_id, position=d.position(), velocity=vel, radius=d.radius, safety_zone=float(d.safety_zone),
                adaptive_safety_radius=r if d.is_adaptive else None, max_adaptive_safety_radius=d.compute_max_adaptive_radius() if d.is_adaptive else None,
                color=d.color if isinstance(d.color, str) else list(d.color), safety_color=(d.safety_color if isinstance(d.safety_color, str) else list(d.safety_color)),
-               trace_color=(d.trace_color if isinstance(d.trace_color, str) else list(d.trace_color))))
+               trace_color=(d.trace_color if isinstance(d.trace_color, str) else list(d.trace_color)), model=d.model))
 
       # Destination check — helper takes Drone objects, not DroneState (BACK-01: no sim access in GUI)
       from drone_sim.domain.utils.helper import all_drones_reached_destination

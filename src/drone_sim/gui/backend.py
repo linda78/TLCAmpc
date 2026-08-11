@@ -20,6 +20,11 @@ class DroneState:
     color: str | list[float]
     safety_color: str | list[float]
     trace_color: str | list[float]
+    # What the *scenario* says this drone looks like, resolved by the config layer — display data like the
+    # colors above. The runtime override (set_drone_model_override) is deliberately not folded in here: it is
+    # view state that outlives any single StepResult, and a result cached from before the override would
+    # otherwise redraw with the model the user just replaced. None for backends that resolve no models.
+    model: DroneModel | None = None
 
 
 @dataclass

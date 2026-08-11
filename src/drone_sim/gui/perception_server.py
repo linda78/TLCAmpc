@@ -23,6 +23,8 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+   from uvicorn import Server
+
    from drone_sim.simulation.simulator import Simulator
 
 _log = logging.getLogger(__name__)
@@ -45,8 +47,11 @@ class PerceptionApiServer:
       self._resolve_sim = resolve_sim
       self._port = int(port)
       self._host = str(host)
-      self._server: object | None = None
+      # Built by the serving thread, not by start() — see start() on why the uvicorn import is not on the Qt thread.
+      self._server: Server | None = None
       self._thread: threading.Thread | None = None
+      # Bridges the gap between "stop() was called" and "the thread got far enough to have a server to stop".
+      self._stop_requested = threading.Event()
 
    @property
    def port(self) -> int:
@@ -70,21 +75,14 @@ class PerceptionApiServer:
    def start(self) -> None:
       """Start serving in a daemon thread; a no-op when already started.
 
-      Imports of ``fastapi``/``uvicorn`` happen here rather than at module import, so a GUI run without the REST perception path never pays for them.
+      Returns as soon as the thread is spawned. The ``fastapi``/``uvicorn`` imports and the app construction happen *inside* the thread, not here:
+      importing fastapi alone costs a few hundred milliseconds, and this method is called from ``load_config`` on the Qt main thread, where that is a
+      visible freeze the moment a REST-perception scenario is opened. A GUI run without that path never imports them at all.
       """
       if self._thread is not None:
          return
 
-      import uvicorn
-      from fastapi import FastAPI
-
-      from drone_sim.api.perception_router import build_perception_router
-
-      app = FastAPI(title="DroneSim perception (GUI)")
-      app.include_router(build_perception_router(self._resolve_sim))
-
-      # log_level="warning" keeps one access-log line per detector poll out of the terminal the GUI was started from.
-      self._server = uvicorn.Server(uvicorn.Config(app, host=self._host, port=self._port, log_level="warning"))
+      self._stop_requested.clear()   # a previous stop() must not shut the new thread down before it binds
       self._thread = threading.Thread(target=self._serve, name=f"perception-api-{self._port}", daemon=True)
       self._thread.start()
       _log.info("Perception API server starting on http://%s:%d/perception", self._host, self._port)
@@ -99,12 +97,17 @@ class PerceptionApiServer:
       """
       deadline = time.monotonic() + timeout
       while time.monotonic() < deadline:
-         if getattr(self._server, "started", False):
+         if self._is_serving():
             return True
          if self._thread is not None and not self._thread.is_alive():
             return False
          time.sleep(_READY_POLL_S)
-      return bool(getattr(self._server, "started", False))
+      # One last look: the server may have come up inside the final poll interval.
+      return self._is_serving()
+
+   def _is_serving(self) -> bool:
+      """Whether uvicorn reports itself bound and accepting. ``False`` while the thread is still constructing it."""
+      return self._server is not None and bool(self._server.started)
 
    def stop(self, timeout: float = 2.0) -> None:
       """Shut the server down cooperatively and join its thread; a no-op when not running.
@@ -112,6 +115,7 @@ class PerceptionApiServer:
       :param timeout: Seconds to wait for the thread to finish. A thread that outlives it is logged and left to the daemon backstop — the GUI must
          not hang on closing because a detector holds a connection open.
       """
+      self._stop_requested.set()
       if self._server is not None:
          # uvicorn's documented way to stop a server from outside its own thread.
          self._server.should_exit = True
@@ -128,13 +132,32 @@ class PerceptionApiServer:
       self._server = None
 
    def _serve(self) -> None:
-      """Thread body: run uvicorn and make sure a failed bind is visible.
+      """Thread body: build the app, then run uvicorn and make sure a failed bind is visible.
+
+      The imports and the app construction live here so the caller of :meth:`start` — the Qt main thread — never pays for them.
 
       A port collision (two GUI instances, same ``camera_api_port``) makes uvicorn log the OS error and call ``sys.exit(1)``, which raises
       ``SystemExit`` — a ``BaseException`` that would otherwise end this thread silently and leave the GUI looking healthy while nothing listens.
       """
+      import uvicorn
+      from fastapi import FastAPI
+
+      from drone_sim.api.perception_router import build_perception_router
+
+      app = FastAPI(title="DroneSim perception (GUI)")
+      app.include_router(build_perception_router(self._resolve_sim))
+
+      # log_level="warning" keeps one access-log line per detector poll out of the terminal the GUI was started from.
+      server = uvicorn.Server(uvicorn.Config(app, host=self._host, port=self._port, log_level="warning"))
+      self._server = server
+
+      # A stop() that arrived while the imports were still running found no server to signal; honour it here instead of binding the port anyway.
+      if self._stop_requested.is_set():
+         _log.info("Perception API server on %s:%d stopped before it began serving", self._host, self._port)
+         return
+
       try:
-         self._server.run()
+         server.run()
       except SystemExit:
          _log.error("Perception API server could not bind %s:%d — port already in use? (another GUI instance, or camera_api_port clashing with the "
                     "REST API)", self._host, self._port)

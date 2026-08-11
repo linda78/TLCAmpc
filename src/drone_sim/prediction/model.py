@@ -24,6 +24,27 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def reparameterize(mu_z: torch.Tensor, logvar_z: torch.Tensor, training: bool) -> torch.Tensor:
+   """Draw ``z`` from ``Q(z|X) = N(mu_z, diag(exp(logvar_z)))``, or take its mean.
+
+   Shared by every variational forecaster here (``AVLSTMModel``, ``AVFNNModel``) so the ablation compares
+   architectures and not two subtly different sampling rules. Sampling happens in training only; inference
+   uses ``z = mu_z``, which is what makes the eval forward pass deterministic.
+
+   Args:
+       mu_z:     Posterior mean, ``(batch, d_z)``.
+       logvar_z: Posterior log-variance, ``(batch, d_z)``.
+       training: Whether to sample (``True``) or return the mean (``False``).
+
+   Returns:
+       ``z`` of shape ``(batch, d_z)``.
+   """
+   if not training:
+      return mu_z
+   std_z = torch.exp(0.5 * logvar_z)
+   return mu_z + std_z * torch.randn_like(std_z)
+
+
 class SinusoidalPositionalEncoding(nn.Module):
    """Sinusoidal positional encoding as in Vaswani et al. (2017).
 
@@ -143,11 +164,7 @@ class AVLSTMModel(nn.Module):
       logvar_z = self.logvar_z_head(e)                  # (batch, d_z)
 
       # Reparameterization trick (sample during training, use mean at inference)
-      if self.training:
-         std_z = torch.exp(0.5 * logvar_z)              # (batch, d_z)
-         z = mu_z + std_z * torch.randn_like(std_z)     # (batch, d_z)
-      else:
-         z = mu_z                                       # deterministic
+      z = reparameterize(mu_z, logvar_z, self.training)  # (batch, d_z)
 
       # LSTM hidden state from z
       # nn.LSTM expects hidden shape: (num_layers=1, batch, h_lstm)

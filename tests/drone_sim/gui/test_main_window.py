@@ -344,6 +344,16 @@ class TestFpvView:
         assert not pixmap.isNull()
         assert pixmap.width() > 0 and pixmap.height() > 0
 
+    def test_switching_between_two_drones_repaints(self, loaded_window):
+        """Both drone views share one widget, so a repaint guard keyed on the widget would skip this switch."""
+        loaded_window._view_combo.setCurrentIndex(1)
+        from_d1 = loaded_window._fpv_label.pixmap().toImage()
+
+        loaded_window._view_combo.setCurrentIndex(2)
+
+        assert loaded_window._current_fpv_drone() == "d2"
+        assert loaded_window._fpv_label.pixmap().toImage() != from_d1
+
     def test_switching_back_shows_canvas(self, loaded_window):
         loaded_window._view_combo.setCurrentIndex(2)
         loaded_window._view_combo.setCurrentIndex(0)
@@ -400,8 +410,9 @@ class TestFpvView:
 class TestObjModelOverride:
     """The 'OBJ Model' button as a temporary override of the config — for *every* view, not just the external one.
 
-    Before this, the button fed ``main_window._obj_path`` (external view) while the drone view read
-    ``Drone.model`` from the config, so the same neighbor could be a mesh in one view and a sphere in the other.
+    Before this, the button fed a path the external view read directly while the drone view read ``Drone.model``
+    from the config, so the same neighbor could be a mesh in one view and a sphere in the other. Both now start
+    from the drone's configured model and let ``_model_override`` win over it.
     """
 
     ASSET = "drone_costum_0_0_5.obj"  # small enough to parse per frame in a test
@@ -430,7 +441,7 @@ class TestObjModelOverride:
         return str(ASSETS_DIR / TestObjModelOverride.ASSET)
 
     def test_no_override_by_default(self, loaded_window):
-        assert loaded_window._obj_path is None
+        assert loaded_window._model_override is None
         assert loaded_window._backend._model_override is None
         assert loaded_window._obj_model_label.text() == "Model: scatter"
 
@@ -447,8 +458,8 @@ class TestObjModelOverride:
         self._pick(monkeypatch, self._asset_path())
         loaded_window._on_select_obj_model()
 
-        assert loaded_window._obj_path is not None
-        assert loaded_window._obj_path.name == self.ASSET
+        assert loaded_window._model_override is not None
+        assert loaded_window._model_override.path.name == self.ASSET
         assert "drone_costum_0_0_5" in loaded_window._obj_model_label.text()
 
     def test_button_reaches_the_drone_view(self, loaded_window, monkeypatch):
@@ -468,7 +479,7 @@ class TestObjModelOverride:
         self._pick(monkeypatch, "")
         loaded_window._on_select_obj_model()
 
-        assert loaded_window._obj_path is None
+        assert loaded_window._model_override is None
         assert loaded_window._backend._model_override is None
         assert loaded_window._obj_model_label.text() == "Model: scatter"
 
@@ -487,7 +498,7 @@ class TestObjModelOverride:
 
         assert len(warnings) == 1
         assert loaded_window._backend._model_override is good
-        assert loaded_window._obj_path.name == self.ASSET
+        assert loaded_window._model_override.path.name == self.ASSET
 
     def test_reset_keeps_the_override(self, loaded_window, monkeypatch):
         """Reset repeats the run, not the choice of what to look at (existing behaviour, now on both views)."""
@@ -496,7 +507,7 @@ class TestObjModelOverride:
 
         loaded_window._on_reset()
 
-        assert loaded_window._obj_path is not None
+        assert loaded_window._model_override is not None
         assert loaded_window._backend._model_override is not None
 
     def test_loading_a_config_drops_the_override(self, loaded_window, monkeypatch, tmp_path):
@@ -511,7 +522,7 @@ class TestObjModelOverride:
         self._pick(monkeypatch, str(path))
         loaded_window._on_open_file()
 
-        assert loaded_window._obj_path is None
+        assert loaded_window._model_override is None
         assert loaded_window._backend._model_override is None
         assert loaded_window._obj_model_label.text() == "Model: scatter"
 

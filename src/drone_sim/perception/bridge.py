@@ -125,7 +125,7 @@ def _finite_difference_velocity(history: list[PositionEstimate]) -> np.ndarray:
    :param history: Estimates for one ``(observer, observed)`` pair, oldest first, as returned by :meth:`PerceptionMailbox.history`.
    :return: ``(3,)`` velocity in m/s; all zeros when no pair with distinct ``captured_time`` exists.
    """
-   if len(history) < 2:
+   if not history:
       return np.zeros(3)
 
    newest = history[-1]
