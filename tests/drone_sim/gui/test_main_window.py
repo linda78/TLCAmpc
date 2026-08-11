@@ -395,3 +395,25 @@ class TestFpvView:
         assert "fpv_d1" in written[0].name
         assert written[0].read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
         assert not list((Path(tmp_path) / "screenshots").glob("*.json"))
+
+
+class TestShutdown:
+    """closeEvent releases what the backend started in the background."""
+
+    def test_close_calls_backend_close(self, window):
+        calls = []
+        window._backend.close = lambda: calls.append(1)
+
+        window.close()
+
+        assert calls == [1]
+
+    def test_close_stops_playback(self, window):
+        window._playing = True
+
+        window.close()
+
+        assert window._playing is False
+
+    def test_close_without_config_does_not_raise(self, window):
+        window.close()  # no scenario ever loaded

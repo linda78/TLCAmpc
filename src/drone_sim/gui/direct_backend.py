@@ -21,6 +21,9 @@ class DirectBackend(SimulationBackend):
       # Rebuilt on every load/reset, never reused: CameraModel caches the last heading per drone id
       # for the zero-velocity fallback, and that cache must not outlive the run it was observed in.
       self._camera: CameraModel | None = None
+      # Started on the first REST-perception scenario and then kept alive across reloads — the router
+      # resolves the simulation per request, so a detector connection survives a reset. See close().
+      self._perception_server: object | None = None
 
    # ------------------------------------------------------------------ #
    # Public API                                                           #
@@ -33,6 +36,7 @@ class DirectBackend(SimulationBackend):
       self._config_path = Path(path)
       self._sim = Simulator.from_config(cfg)
       self._camera = self._make_camera()
+      self._ensure_perception_server(cfg)
       return self._make_sim_state()
 
    def step(self) -> StepResult:
@@ -72,12 +76,39 @@ class DirectBackend(SimulationBackend):
       view = self._camera.capture(drone, self._sim.drones, step=self._sim.step_count, sim_time=self._sim.t)
       return render_fpv_png(view, self._sim.obstacles, models={d.drone_id: d.model for d in self._sim.drones}, size=size)
 
+   def close(self) -> None:
+      """Stop the perception API thread. Idempotent, safe to call without a loaded config."""
+      if self._perception_server is not None:
+         self._perception_server.stop()
+         self._perception_server = None
+
    # ------------------------------------------------------------------ #
    # Private helpers                                                      #
    # ------------------------------------------------------------------ #
 
    def _make_camera(self) -> CameraModel:
       return CameraModel(fov_deg=self._cfg.camera_fov_deg, range_m=self._cfg.camera_range)
+
+   def _ensure_perception_server(self, cfg: ScenarioConfig) -> None:
+      """Start the perception REST server once, for scenarios that ask the detector to pull images over HTTP.
+
+      Only ``camera_backend == "rest"`` starts a listener: every other scenario — including every existing one — stays exactly as it was, and two
+      GUI instances only collide on ``camera_api_port`` when both actually serve perception.
+
+      Started at most once per backend. A reload never restarts it, and never stops it either: the resolver below hands out ``self._sim``, so the
+      running server follows the new simulation on its own and a detector mid-conversation is not disconnected by a reset. Loading a non-perception
+      scenario afterwards therefore leaves the server up, answering ``409`` until a perception scenario is loaded again.
+
+      The uvicorn import lives in :meth:`PerceptionApiServer.start`, so the default GUI path never pays for it.
+      """
+      if self._perception_server is not None or not (cfg.camera_enabled and cfg.camera_backend == "rest"):
+         return
+
+      from drone_sim.gui.perception_server import PerceptionApiServer
+
+      server = PerceptionApiServer(lambda: self._sim, port=cfg.camera_api_port)
+      server.start()
+      self._perception_server = server
 
    def _make_sim_state(self) -> SimState:
       sim = self._sim

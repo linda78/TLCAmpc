@@ -101,3 +101,12 @@ class SimulationBackend(ABC):
         :return: PNG bytes, or ``None`` when no drone with that id exists.
         """
         ...
+
+    def close(self) -> None:
+        """Release everything the backend started behind the scenes (threads, sockets). Idempotent.
+
+        Called when the window closes. Deliberately concrete and empty rather than abstract: a backend
+        that owns nothing but the simulation object has nothing to release, and should not be forced to
+        say so.
+        """
+        return

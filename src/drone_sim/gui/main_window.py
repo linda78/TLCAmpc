@@ -706,6 +706,22 @@ class MainWindow(QMainWindow):
         self._canvas.draw_idle()
 
     # ------------------------------------------------------------------ #
+    # Shutdown                                                             #
+    # ------------------------------------------------------------------ #
+
+    def closeEvent(self, event) -> None:
+        """Shut down what the backend started in the background before the window goes away.
+
+        Currently that is the perception REST server thread. Its daemon flag would collect it eventually, but
+        only at interpreter exit — which keeps the port bound for as long as the process lingers. A running
+        recording is finalized here too, so closing mid-capture leaves a playable file instead of a stub."""
+        self._playing = False
+        if self._recording:
+            self._stop_recording()
+        self._backend.close()
+        super().closeEvent(event)
+
+    # ------------------------------------------------------------------ #
     # Responsive layout                                                    #
     # ------------------------------------------------------------------ #
 

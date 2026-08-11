@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.responses import Response
 
+from drone_sim.api.perception_router import build_perception_router
 from drone_sim.api.render import render_png
 from drone_sim.api.schemas import ConfigResponse, HealthResponse, StateResponse, StepResponse
 from drone_sim.domain.config import ScenarioConfig
@@ -13,6 +14,9 @@ from drone_sim.simulation.simulator import Simulator
 app = FastAPI(title="DroneSim 3D (REST)")
 
 _sim: Simulator | None = None
+
+# Perception endpoints for the external video detector. The lambda is read on every request, so the router always sees whatever /config installed last.
+app.include_router(build_perception_router(lambda: _sim))
 
 
 @app.get("/swagger", include_in_schema=False)
