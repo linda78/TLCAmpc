@@ -235,3 +235,78 @@ def test_config_path_none_before_load() -> None:
         room_max=np.ones(3)
     )
     assert s.config_path is None
+    assert s.drone_ids == []
+
+
+# --- SimState.drone_ids ---
+
+TWO_DRONE_CONFIG = {
+    **MINIMAL_CONFIG,
+    "drones": [
+        {"drone_id": "d1", "start": [0.0, 0.0, 5.0], "target": [8.0, 0.0, 5.0]},
+        {"drone_id": "d2", "start": [8.0, 0.0, 5.0], "target": [0.0, 0.0, 5.0]},
+    ],
+}
+
+
+@pytest.fixture
+def two_drone_backend(tmp_path: Path) -> DirectBackend:
+    p = tmp_path / "two_drones.json"
+    p.write_text(json.dumps(TWO_DRONE_CONFIG), encoding="utf-8")
+    backend = DirectBackend()
+    backend.load_config(p)
+    return backend
+
+
+def test_load_config_reports_drone_ids(two_drone_backend: DirectBackend) -> None:
+    state = two_drone_backend.get_state()
+    assert state.drone_ids == ["d1", "d2"]
+
+
+def test_drone_ids_length_matches_drone_count(two_drone_backend: DirectBackend) -> None:
+    """The GUI fills its view picker from drone_ids before the first step, where drone_count is all it had."""
+    state = two_drone_backend.get_state()
+    assert len(state.drone_ids) == state.drone_count
+
+
+def test_drone_ids_available_before_first_step(config_file: Path) -> None:
+    backend = DirectBackend()
+    state = backend.load_config(config_file)
+    assert state.drone_ids == ["d1"]
+
+
+# --- render_fpv ---
+
+def test_render_fpv_returns_png_bytes(two_drone_backend: DirectBackend) -> None:
+    png = two_drone_backend.render_fpv("d1", (160, 120))
+    assert isinstance(png, bytes)
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_render_fpv_unknown_drone_returns_none(two_drone_backend: DirectBackend) -> None:
+    assert two_drone_backend.render_fpv("nope", (160, 120)) is None
+
+
+def test_render_fpv_works_without_camera_enabled(two_drone_backend: DirectBackend) -> None:
+    """camera_enabled gates the perception pipeline, not drawing a picture on request — TWO_DRONE_CONFIG leaves it off."""
+    assert two_drone_backend._cfg.camera_enabled is False
+    assert two_drone_backend.render_fpv("d1", (160, 120)) is not None
+
+
+def test_render_fpv_after_steps(two_drone_backend: DirectBackend) -> None:
+    two_drone_backend.step()
+    two_drone_backend.step()
+    assert two_drone_backend.render_fpv("d2", (160, 120)) is not None
+
+
+def test_render_fpv_after_reset(two_drone_backend: DirectBackend) -> None:
+    """reset() replaces the Simulator — the camera must follow, or capture() reads drones from the old run."""
+    two_drone_backend.step()
+    two_drone_backend.reset()
+    assert two_drone_backend.render_fpv("d1", (160, 120)) is not None
+
+
+def test_render_fpv_before_load_raises() -> None:
+    backend = DirectBackend()
+    with pytest.raises(RuntimeError):
+        backend.render_fpv("d1", (160, 120))

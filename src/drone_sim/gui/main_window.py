@@ -8,8 +8,8 @@ import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QKeySequence, QShortcut
-from PySide6.QtWidgets import (QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QVBoxLayout, QWidget)
+from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
+from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
 from drone_sim.gui.backend import StepResult, SimState
 from drone_sim.gui.direct_backend import DirectBackend
@@ -20,6 +20,10 @@ _PREDICTION_TUBE_SAMPLES = 50           # arc-length samples per BoF prediction 
 _PREDICTION_TUBE_OUTER_ALPHA = 0.03     # safety-zone tube
 _PREDICTION_TUBE_INNER_ALPHA = 0.08     # core (drone-radius) tube
 _PREDICTION_TUBE_CENTERLINE_ALPHA = 0.02  # dashed centerline opacity (drawn once)
+
+_EXTERNAL_VIEW_LABEL = "External view"  # first combo entry — the orbiting 3D scene, itemData None
+_FPV_MIN_SIZE = (320, 240)              # floor for the render size; the label reports garbage before the first layout pass
+_FPV_SCREENSHOT_SIZE = (1280, 960)      # FPV screenshots are rendered fresh, not scaled up from the on-screen frame
 
 def _coerce_color(color):
    """Convert color list/tuple to a tuple matplotlib accepts (str passes through)."""
@@ -66,6 +70,24 @@ class MainWindow(QMainWindow):
         self._canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._canvas.setMinimumSize(400, 300)
         self._ax = fig.add_subplot(111, projection="3d")
+
+        # ---- FPV view ----
+        # The camera image is a plain pixmap, not a matplotlib artist, so it gets its own widget and the two
+        # views are swapped by a stack. Keeping the canvas alive (rather than rebuilding it) is what lets the
+        # orbit angle of the 3D scene survive a trip through the FPV view.
+        self._fpv_label = QLabel("No camera view yet")
+        self._fpv_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._fpv_label.setMinimumSize(400, 300)
+        self._fpv_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        self._view_stack = QStackedWidget()
+        self._view_stack.addWidget(self._canvas)
+        self._view_stack.addWidget(self._fpv_label)
+
+        self._view_combo = QComboBox()
+        self._view_combo.addItem(_EXTERNAL_VIEW_LABEL, None)  # itemData carries the drone id, None = external
 
         # ---- Controls ----
         self._btn_open = QPushButton("Open")
@@ -130,6 +152,7 @@ class MainWindow(QMainWindow):
         self._btn_screenshot.clicked.connect(self._on_screenshot)
         self._btn_record.clicked.connect(self._on_record)
         self._btn_obj_model.clicked.connect(self._on_select_obj_model)
+        self._view_combo.currentIndexChanged.connect(self._on_view_changed)
         self._speed_slider.valueChanged.connect(self._on_speed_changed)
 
         # ---- Keyboard shortcuts ----
@@ -212,6 +235,37 @@ class MainWindow(QMainWindow):
         self._info_dt_label.setText(f"{state.dt} s")
         self._info_drones_label.setText(str(state.drone_count))
         self._info_obstacles_label.setText(str(state.obstacle_count))
+        self._populate_view_combo(state.drone_ids)
+
+    # ------------------------------------------------------------------ #
+    # View selector (external 3D scene <-> FPV of one drone)               #
+    # ------------------------------------------------------------------ #
+
+    def _current_fpv_drone(self) -> str | None:
+        """Drone id selected in the view combo, or ``None`` while the external 3D view is showing."""
+        return self._view_combo.currentData()
+
+    def _populate_view_combo(self, drone_ids: list[str]) -> None:
+        """Refill the view selector for a freshly loaded scenario, resetting to the external view."""
+        blocked = self._view_combo.blockSignals(True)
+        self._view_combo.clear()
+        self._view_combo.addItem(_EXTERNAL_VIEW_LABEL, None)
+        for drone_id in drone_ids:
+            self._view_combo.addItem(f"View from {drone_id}", drone_id)
+        self._view_combo.setCurrentIndex(0)
+        self._view_combo.blockSignals(blocked)
+        self._on_view_changed()  # signals were blocked — apply the reset to external view by hand
+
+    def _on_view_changed(self, _index: int = 0) -> None:
+        fpv_id = self._current_fpv_drone()
+        # The video writer is bound to the matplotlib figure. In FPV mode that figure is hidden and stops being
+        # redrawn, so a running recording would keep grabbing a frozen scene nobody is looking at.
+        if fpv_id is not None and self._recording:
+            self._stop_recording()
+        self._btn_record.setEnabled(fpv_id is None)
+        self._view_stack.setCurrentWidget(self._canvas if fpv_id is None else self._fpv_label)
+        if self._last_result is not None:
+            self._redraw(self._last_result)
 
     def _update_collision_indicator(self, result: StepResult) -> None:
         if result.last_collisions:
@@ -257,6 +311,16 @@ class MainWindow(QMainWindow):
 
     def _redraw(self, result: StepResult) -> None:
         self._last_result = result
+
+        # FPV branches out before the 3D path rather than after it: the whole scene below — wireframes,
+        # spheres, traces, prediction tubes — would otherwise be rebuilt every tick into a canvas the stack
+        # is not showing. Placing the branch above the cla()/view_init block also keeps the external view's
+        # orbit angle out of reach of the FPV path entirely.
+        fpv_id = self._current_fpv_drone()
+        if fpv_id is not None:
+            self._draw_fpv(fpv_id)
+            return
+
         # Save orbit angle BEFORE cla() — ax.cla() resets elev/azim to defaults (pitfall 3)
         elev = self._ax.elev
         azim = self._ax.azim
@@ -349,6 +413,22 @@ class MainWindow(QMainWindow):
         if self._recording:
             self._capture_frame()
 
+    def _draw_fpv(self, drone_id: str) -> None:
+        """Render the drone's camera image at the label's own pixel size, so the view scales with the window."""
+        size = self._fpv_label.size()
+        width = max(_FPV_MIN_SIZE[0], size.width())
+        height = max(_FPV_MIN_SIZE[1], size.height())
+
+        png = self._backend.render_fpv(drone_id, (width, height))
+        if png is None:
+            self._fpv_label.setPixmap(QPixmap())
+            self._fpv_label.setText(f"No camera view for {drone_id}")
+            return
+
+        pixmap = QPixmap()
+        pixmap.loadFromData(png, "PNG")
+        self._fpv_label.setPixmap(pixmap)
+
     def _update_step_label(self, result: StepResult) -> None:
         self._step_label.setText(f"Step: {result.step_count} | t: {result.t:.2f} s")
 
@@ -379,6 +459,13 @@ class MainWindow(QMainWindow):
         result = self._last_result
         if result is None:
             QMessageBox.warning(self, "Screenshot", "No simulation loaded yet.")
+            return
+
+        # The block below rebuilds the 3D scene from scratch — in FPV mode that would save a picture of
+        # something other than what is on screen.
+        fpv_id = self._current_fpv_drone()
+        if fpv_id is not None:
+            self._save_fpv_screenshot(fpv_id, result)
             return
 
         sim_state = self._backend.get_state()
@@ -499,6 +586,27 @@ class MainWindow(QMainWindow):
 
         self._step_label.setText(f"Saved: {path.name}")
 
+    def _save_fpv_screenshot(self, drone_id: str, result: StepResult) -> None:
+        """Write the drone's camera image to ``screenshots/``, re-rendered at print size.
+
+        No JSON snapshot alongside it, unlike the 3D screenshot: an FPV frame is reproduced by loading the
+        same scenario and stepping to the same step, not from a handful of positions.
+        """
+        png = self._backend.render_fpv(drone_id, _FPV_SCREENSHOT_SIZE)
+        if png is None:
+            QMessageBox.warning(self, "Screenshot", f"No camera view for {drone_id}.")
+            return
+
+        sim_state = self._backend.get_state()
+        scenario_name = Path(sim_state.config_path).stem if sim_state.config_path else "unknown"
+        out_dir = Path("screenshots")
+        out_dir.mkdir(exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = out_dir / f"{scenario_name}_fpv_{drone_id}_{result.step_count}_{timestamp}.png"
+        path.write_bytes(png)
+
+        self._step_label.setText(f"Saved: {path.name}")
+
     # ------------------------------------------------------------------ #
     # Video recording                                                    #
     # ------------------------------------------------------------------ #
@@ -616,7 +724,8 @@ class MainWindow(QMainWindow):
         # Remove old layout if exists
         if self._main_layout is not None:
             # Reparent widgets before deleting layout
-            self._canvas.setParent(None)
+            self._view_stack.setParent(None)  # takes canvas + FPV label with it — both stay children of the stack
+            self._view_combo.setParent(None)
             self._btn_open.setParent(None)
             self._btn_play.setParent(None)
             self._btn_pause.setParent(None)
@@ -652,6 +761,9 @@ class MainWindow(QMainWindow):
             ctrl_layout.addSpacing(10)
             ctrl_layout.addWidget(self._btn_obj_model)
             ctrl_layout.addWidget(self._obj_model_label)
+            ctrl_layout.addSpacing(10)
+            ctrl_layout.addWidget(QLabel("View:"))
+            ctrl_layout.addWidget(self._view_combo)
             ctrl_layout.addSpacing(15)
             ctrl_layout.addWidget(self._info_box)
             ctrl_layout.addWidget(self._collision_label)
@@ -671,8 +783,8 @@ class MainWindow(QMainWindow):
             main_layout.setContentsMargins(2, 2, 2, 2)
             main_layout.setSpacing(4)
             main_layout.addWidget(ctrl_container)
-            main_layout.addWidget(self._canvas, stretch=1)
-            self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            main_layout.addWidget(self._view_stack, stretch=1)
+            self._view_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         else:
             # Portrait: controls at bottom, horizontal
             ctrl_layout = QHBoxLayout()
@@ -684,6 +796,8 @@ class MainWindow(QMainWindow):
             ctrl_layout.addWidget(self._btn_screenshot)
             ctrl_layout.addWidget(self._btn_record)
             ctrl_layout.addWidget(self._btn_obj_model)
+            ctrl_layout.addWidget(QLabel("View:"))
+            ctrl_layout.addWidget(self._view_combo)
             ctrl_layout.addStretch()
             ctrl_layout.addWidget(QLabel("Speed:"))
             self._speed_slider.setOrientation(Qt.Orientation.Horizontal)
@@ -703,10 +817,10 @@ class MainWindow(QMainWindow):
             main_layout = QVBoxLayout()
             main_layout.setContentsMargins(2, 2, 2, 2)
             main_layout.setSpacing(4)
-            main_layout.addWidget(self._canvas, stretch=1)
+            main_layout.addWidget(self._view_stack, stretch=1)
             main_layout.addLayout(status_row)
             main_layout.addWidget(ctrl_container)
-            self._canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            self._view_stack.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         self._central.setLayout(main_layout)
         self._main_layout = main_layout

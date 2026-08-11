@@ -226,10 +226,13 @@ __marimo__/
 *.pyd
 *.log
 #tools/*
-#paper2_tools/*
+paper?_*
 doc/*
 results/*
 logs/*
+screenshots/*
+src/drone_sim/resources/*
+out/*
 
 # Terraform
 infrastructure/terraform/.terraform/

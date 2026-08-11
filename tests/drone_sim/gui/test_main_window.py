@@ -280,3 +280,118 @@ class TestInfoPanel:
         )
         window._on_config_loaded(state)
         assert window._info_path_label.toolTip() == "/full/absolute/path/config.json"
+
+
+class TestFpvView:
+    """The 'External view <-> View from drone X' switch: combo, stacked widget, and what each side must not disturb."""
+
+    FPV_CONFIG = {
+        "dt": 0.1,
+        "physics": {"type": "linear_kinematics", "v_max": 2.0, "u_min": -1.0, "u_max": 1.0},
+        "controller": {"type": "mpc_agent"},
+        "coordinator": {"type": "mpc_central"},
+        "camera_fov_deg": 120.0,
+        "camera_range": 15.0,
+        "drones": [
+            {"drone_id": "d1", "start": [0.0, 0.0, 5.0], "target": [8.0, 0.0, 5.0]},
+            {"drone_id": "d2", "start": [8.0, 0.0, 5.0], "target": [0.0, 0.0, 5.0]},
+        ],
+        "room": {"min": [-10.0, -10.0, 0.0], "max": [10.0, 10.0, 10.0]},
+    }
+
+    @pytest.fixture
+    def loaded_window(self, window, tmp_path):
+        """MainWindow with a two-drone scenario loaded — mirrors _on_open_file without the file dialog."""
+        import json
+        from pathlib import Path
+
+        path = Path(tmp_path) / "fpv_scenario.json"
+        path.write_text(json.dumps(self.FPV_CONFIG), encoding="utf-8")
+        window._backend.load_config(path)
+        result = window._backend.step()
+        window._redraw(result)
+        window._on_config_loaded(window._backend.get_state())
+        return window
+
+    def test_combo_starts_with_external_view_only(self, window):
+        assert window._view_combo.count() == 1
+        assert window._view_combo.itemData(0) is None
+
+    def test_current_fpv_drone_is_none_by_default(self, window):
+        assert window._current_fpv_drone() is None
+
+    def test_stack_starts_on_canvas(self, window):
+        assert window._view_stack.currentWidget() is window._canvas
+
+    def test_config_load_populates_combo(self, loaded_window):
+        assert loaded_window._view_combo.count() == 3  # external + d1 + d2
+        assert loaded_window._view_combo.itemData(0) is None
+        assert loaded_window._view_combo.itemData(1) == "d1"
+        assert loaded_window._view_combo.itemData(2) == "d2"
+
+    def test_reload_does_not_accumulate_entries(self, loaded_window):
+        loaded_window._on_config_loaded(loaded_window._backend.get_state())
+        assert loaded_window._view_combo.count() == 3
+
+    def test_selecting_drone_switches_to_fpv_label(self, loaded_window):
+        loaded_window._view_combo.setCurrentIndex(1)
+        assert loaded_window._current_fpv_drone() == "d1"
+        assert loaded_window._view_stack.currentWidget() is loaded_window._fpv_label
+
+    def test_selecting_drone_renders_a_pixmap(self, loaded_window):
+        loaded_window._view_combo.setCurrentIndex(1)
+        pixmap = loaded_window._fpv_label.pixmap()
+        assert not pixmap.isNull()
+        assert pixmap.width() > 0 and pixmap.height() > 0
+
+    def test_switching_back_shows_canvas(self, loaded_window):
+        loaded_window._view_combo.setCurrentIndex(2)
+        loaded_window._view_combo.setCurrentIndex(0)
+        assert loaded_window._current_fpv_drone() is None
+        assert loaded_window._view_stack.currentWidget() is loaded_window._canvas
+
+    def test_round_trip_preserves_orbit_angle(self, loaded_window):
+        """A detour through the FPV view must leave the external view exactly where the user parked it.
+
+        Currently this holds for free — matplotlib 3.10's ``cla()`` no longer resets ``elev``/``azim``, so
+        even the 3D path would preserve them. The test pins the contract for whoever next touches either
+        branch of ``_redraw`` (or upgrades matplotlib).
+        """
+        loaded_window._ax.view_init(elev=33.0, azim=57.0)
+        elev, azim = loaded_window._ax.elev, loaded_window._ax.azim
+
+        loaded_window._view_combo.setCurrentIndex(1)
+        loaded_window._backend.step()
+        loaded_window._redraw(loaded_window._last_result)
+        loaded_window._view_combo.setCurrentIndex(0)
+
+        assert loaded_window._ax.elev == pytest.approx(elev)
+        assert loaded_window._ax.azim == pytest.approx(azim)
+
+    def test_stepping_in_fpv_mode_updates_the_image(self, loaded_window):
+        """_tick() calls _redraw() unconditionally — in FPV mode that must render, not fall through to the 3D path."""
+        loaded_window._view_combo.setCurrentIndex(1)
+        before = loaded_window._fpv_label.pixmap().toImage()
+        for _ in range(15):
+            loaded_window._redraw(loaded_window._backend.step())
+        assert loaded_window._fpv_label.pixmap().toImage() != before
+
+    def test_record_button_disabled_in_fpv_mode(self, loaded_window):
+        """The video writer grabs the matplotlib figure, which is hidden in FPV mode."""
+        loaded_window._view_combo.setCurrentIndex(1)
+        assert loaded_window._btn_record.isEnabled() is False
+        loaded_window._view_combo.setCurrentIndex(0)
+        assert loaded_window._btn_record.isEnabled() is True
+
+    def test_screenshot_in_fpv_mode_writes_png(self, loaded_window, tmp_path, monkeypatch):
+        from pathlib import Path
+
+        monkeypatch.chdir(tmp_path)
+        loaded_window._view_combo.setCurrentIndex(1)
+        loaded_window._on_screenshot()
+
+        written = list((Path(tmp_path) / "screenshots").glob("*.png"))
+        assert len(written) == 1
+        assert "fpv_d1" in written[0].name
+        assert written[0].read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+        assert not list((Path(tmp_path) / "screenshots").glob("*.json"))

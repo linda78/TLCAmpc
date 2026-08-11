@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from drone_sim.domain.config import ScenarioConfig
+from drone_sim.perception import CameraModel, render_fpv_png
 from drone_sim.simulation.simulator import Simulator
 from drone_sim.gui.backend import (SimulationBackend, SimState, DroneState, StepResult, PredictedTrajectory, )
 
@@ -17,6 +18,9 @@ class DirectBackend(SimulationBackend):
       self._sim: Simulator | None = None
       self._cfg: ScenarioConfig | None = None
       self._config_path: Path | None = None
+      # Rebuilt on every load/reset, never reused: CameraModel caches the last heading per drone id
+      # for the zero-velocity fallback, and that cache must not outlive the run it was observed in.
+      self._camera: CameraModel | None = None
 
    # ------------------------------------------------------------------ #
    # Public API                                                           #
@@ -28,6 +32,7 @@ class DirectBackend(SimulationBackend):
       self._cfg = cfg
       self._config_path = Path(path)
       self._sim = Simulator.from_config(cfg)
+      self._camera = self._make_camera()
       return self._make_sim_state()
 
    def step(self) -> StepResult:
@@ -46,16 +51,40 @@ class DirectBackend(SimulationBackend):
          raise RuntimeError("Call load_config() before reset()")
       # Uses CACHED config — does NOT re-read from disk
       self._sim = Simulator.from_config(self._cfg)
+      self._camera = self._make_camera()
+
+   def render_fpv(self, drone_id: str, size: tuple[int, int]) -> bytes | None:
+      """Render ``drone_id``'s pinhole camera image of the current simulation state.
+
+      Rendered synchronously on the calling thread — no ``PerceptionWorker`` involved. The worker exists to
+      keep a per-step capture of *every* drone off the simulation thread; here exactly one view is drawn on
+      demand, well inside a GUI frame budget.
+
+      The camera geometry comes from the scenario's ``camera_fov_deg``/``camera_range`` so this view matches
+      what the detector will later work with; ``camera_enabled`` is deliberately not consulted — it gates the
+      perception pipeline, not drawing a picture when someone asks for one.
+      """
+      if self._sim is None:
+         raise RuntimeError("Call load_config() before render_fpv()")
+      drone = next((d for d in self._sim.drones if d.drone_id == drone_id), None)
+      if drone is None:
+         return None
+      view = self._camera.capture(drone, self._sim.drones, step=self._sim.step_count, sim_time=self._sim.t)
+      return render_fpv_png(view, self._sim.obstacles, models={d.drone_id: d.model for d in self._sim.drones}, size=size)
 
    # ------------------------------------------------------------------ #
    # Private helpers                                                      #
    # ------------------------------------------------------------------ #
 
+   def _make_camera(self) -> CameraModel:
+      return CameraModel(fov_deg=self._cfg.camera_fov_deg, range_m=self._cfg.camera_range)
+
    def _make_sim_state(self) -> SimState:
       sim = self._sim
       coordinator_type = (type(sim.coordinator).__name__ if sim.coordinator is not None else "none")
       return SimState(drone_count=len(sim.drones), obstacle_count=len(sim.obstacles), obstacles=sim.obstacles, coordinator_type=coordinator_type,
-                      dt=sim.dt, step_count=sim.step_count, room_min=sim.room_min, room_max=sim.room_max, config_path=str(self._config_path) if self._config_path is not None else None, )
+                      dt=sim.dt, step_count=sim.step_count, room_min=sim.room_min, room_max=sim.room_max, config_path=str(self._config_path) if self._config_path is not None else None,
+                      drone_ids=[d.drone_id for d in sim.drones], )
 
    def _make_step_result(self) -> StepResult:
       sim = self._sim

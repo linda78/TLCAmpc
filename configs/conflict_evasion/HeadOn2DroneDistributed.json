@@ -44,7 +44,9 @@
       "cons_stop": 0.0,
       "physics": "default",
       "alpha": 0.3,
-      "drone_color": "#800080"
+      "drone_color": "#800080",
+      "drone_model": "obj",
+      "drone_model_path": "drone_costum_0_0_5.obj"
     },
     {
       "drone_id": "drone-2",
@@ -55,7 +57,9 @@
       "cons_stop": 0.0,
       "physics": "default",
       "alpha": 0.3,
-      "drone_color": "#DC143C"
+      "drone_color": "#DC143C",
+      "drone_model": "obj",
+      "drone_model_path": "drone_costum_0_0_5.obj"
     }
   ]
 }

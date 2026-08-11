@@ -62,6 +62,7 @@ class SimState:
     room_min: np.ndarray
     room_max: np.ndarray
     config_path: str | None = None   # absolute path to loaded JSON; None before first load
+    drone_ids: list[str] = field(default_factory=list)  # ids in scenario order, for view/drone pickers before the first step
 
 
 class SimulationBackend(ABC):
@@ -85,4 +86,18 @@ class SimulationBackend(ABC):
     @abstractmethod
     def reset(self) -> None:
         """Reset simulation to initial state from the last loaded config."""
+        ...
+
+    @abstractmethod
+    def render_fpv(self, drone_id: str, size: tuple[int, int]) -> bytes | None:
+        """Render what one drone's camera sees right now, as PNG bytes of exactly ``size`` pixels.
+
+        Rendering lives behind the backend because it needs the actual ``Drone`` objects — their resolved
+        display model and the obstacle list — none of which :class:`DroneState` carries (BACK-01: the GUI
+        never touches the simulation).
+
+        :param drone_id: Observing drone.
+        :param size: ``(width, height)`` in pixels.
+        :return: PNG bytes, or ``None`` when no drone with that id exists.
+        """
         ...
