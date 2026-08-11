@@ -105,6 +105,26 @@ class TestConfigEndpoint:
       assert response2.status_code == 200
       assert response2.json()["num_drones"] == 2
 
+   def test_config_closes_the_previous_simulation(self, client, valid_config):
+      """Test a replaced simulation gives its perception worker thread back (risk R2).
+
+      Without this, a long-running REST host would end up with one capturing-and-rendering thread per
+      scenario it was ever asked to load.
+      """
+      import threading
+
+      import drone_sim.api.app as app_module
+
+      camera_config = {**valid_config, "camera_enabled": True, "camera_async": True}
+      try:
+         client.post("/config", json=camera_config)
+         client.post("/config", json=camera_config)
+
+         assert len([t for t in threading.enumerate() if t.name == "PerceptionWorker"]) == 1
+      finally:
+         # The module-level simulation outlives this test; the next `client` fixture only rebinds the name.
+         app_module._sim.close()
+
 
 # =============================================================================
 # POST /step Tests

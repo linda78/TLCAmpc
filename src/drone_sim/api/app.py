@@ -34,6 +34,10 @@ def health() -> HealthResponse:
 @app.post("/config", response_model=ConfigResponse, tags=["simulation"])
 def load_config(cfg: ScenarioConfig) -> ConfigResponse:
    global _sim
+   # The outgoing simulation may own a perception worker thread; without this, every POST /config would leave
+   # one more of them capturing and rendering for a scenario nobody looks at any more (risk R2).
+   if _sim is not None:
+      _sim.close()
    _sim = Simulator.from_config(cfg)
    return ConfigResponse(status="loaded", num_drones=len(_sim.drones))
 

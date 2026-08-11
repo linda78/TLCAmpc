@@ -563,3 +563,254 @@ class TestSimulatorEdgeCases:
       pos = sim.drones[0].position()
       max_x = sim.room_max[0] - sim.drones[0].radius
       assert pos[0] <= max_x + 1e-6
+
+
+class TestSimulatorPerceptionWiring:
+   """Tests for the camera perception pipeline hanging off the simulator (step 8 of the perception plan).
+
+   The pieces themselves — camera geometry, worker, adapter, bridge, coordinators — have their own tests under
+   ``tests/drone_sim/perception``. What is checked here is that ``from_config`` connects them, that ``step``
+   captures at the configured rate, that the coordinator only sees the mailbox when ``camera_feeds_dmpc`` says
+   so, and that ``close`` gives the worker thread back.
+
+   Every test runs with ``camera_async=False`` so a capture is finished when ``step`` returns (risk R5), and
+   with ``camera_noise_sigma=0`` so the stub detector reproduces ground truth exactly.
+   """
+
+   def _cfg(self, drones=None, **camera):
+      """A two-drone scenario facing each other on the x axis, plus whatever camera flags the test needs."""
+      return ScenarioConfig(
+         dt=0.1,
+         physics=PhysicsSpec(type="linear_kinematics"),
+         controller=ControllerSpec(type="mpc_agent"),
+         coordinator=ControllerSpec(type="mpc_central"),
+         drones=drones if drones is not None else [
+            DroneConfig(drone_id="d1", start=[0, 0, 5], target=[8, 0, 5]),
+            DroneConfig(drone_id="d2", start=[4, 0, 5], target=[-4, 0, 5]),
+         ],
+         room=RoomConfig(min=[-10, -10, 0], max=[10, 10, 10]),
+         **camera,
+      )
+
+   # --- from_config ---
+
+   def test_perception_is_off_without_camera_enabled(self):
+      """Test the default path builds nothing: every existing scenario must be untouched by this feature."""
+      sim = Simulator.from_config(self._cfg())
+
+      assert sim._perception_mailbox is None
+      assert sim._perception_worker is None
+      assert sim._perception_view_store is None
+      assert sim._camera_model is None
+      assert sim._camera_feeds_dmpc is False
+
+   def test_camera_enabled_builds_mailbox_camera_and_worker(self):
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False))
+
+      try:
+         assert sim._perception_mailbox is not None
+         assert sim._perception_worker is not None
+         assert sim._camera_model.fov_deg == 90.0
+         assert sim._camera_model.range_m == 10.0
+      finally:
+         sim.close()
+
+   def test_stub_backend_has_no_view_store(self):
+      """Test the in-process path skips the REST pickup point — nothing would ever fetch from it."""
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False))
+
+      try:
+         assert sim._perception_view_store is None
+      finally:
+         sim.close()
+
+   def test_rest_backend_builds_the_view_store(self):
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False, camera_backend="rest", camera_render_images=True))
+
+      try:
+         assert sim._perception_view_store is not None
+         assert sim._perception_view_store.observers() == []
+      finally:
+         sim.close()
+
+   def test_flags_are_copied_onto_the_simulation(self):
+      """Test the three names the REST router duck-types off the simulation, plus the capture rate.
+
+      ``_perception_view_store``, ``_perception_mailbox`` and ``_camera_expose_truth`` are the contract with
+      ``api/perception_router.py``; renaming one there or here turns the detector's endpoints into 409s.
+      """
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False, camera_backend="rest", camera_render_images=True,
+                                            camera_expose_truth=True, camera_feeds_dmpc=True, camera_rate_steps=4))
+
+      try:
+         assert sim._camera_expose_truth is True
+         assert sim._camera_feeds_dmpc is True
+         assert sim._camera_rate_steps == 4
+         assert getattr(sim, "_perception_mailbox", None) is not None
+         assert getattr(sim, "_perception_view_store", None) is not None
+      finally:
+         sim.close()
+
+   # --- capture ---
+
+   def test_step_fills_the_mailbox_with_ground_truth(self):
+      """Test the whole in-process chain in one step: capture -> stub detect -> mailbox, noise-free."""
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False, camera_fov_deg=180.0))
+
+      try:
+         d2_position = sim.drones[1].position().copy()
+         sim.step()
+
+         estimates = sim._perception_mailbox.latest("d1")
+         assert list(estimates) == ["d2"]
+         assert_array_almost_equal(estimates["d2"].position, d2_position)
+         assert estimates["d2"].captured_step == 0
+      finally:
+         sim.close()
+
+   def test_capture_uses_the_pre_step_state(self):
+      """Test the capture token belongs to the state that was observed, not to the one the step produced."""
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False, camera_fov_deg=180.0))
+
+      try:
+         sim.step()
+         sim.step()
+
+         estimate = sim._perception_mailbox.latest("d1")["d2"]
+         assert estimate.captured_step == 1
+         assert estimate.captured_time == pytest.approx(0.1)
+      finally:
+         sim.close()
+
+   def test_rate_steps_captures_every_nth_step(self):
+      """Test a camera slower than the simulation: in between, the previous estimate simply stays."""
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False, camera_fov_deg=180.0, camera_rate_steps=3))
+
+      try:
+         captured = []
+         for _ in range(7):
+            sim.step()
+            captured.append(sim._perception_mailbox.latest("d1")["d2"].captured_step)
+
+         # Captures at steps 0, 3 and 6; the steps in between report the last capture unchanged.
+         assert captured == [0, 0, 0, 3, 3, 3, 6]
+      finally:
+         sim.close()
+
+   def test_neighbor_outside_the_cone_is_never_estimated(self):
+      """Test FOV blindness reaches the mailbox: what the camera cannot see, the DMPC will not get.
+
+      Both drones fly toward ``+x`` in single file, so the visibility is deliberately asymmetric — the
+      follower observes the leader, the leader never observes the follower. Asserting both halves in one
+      scenario keeps the negative half honest: a pipeline that captured nothing at all would fail the first
+      assertion.
+      """
+      drones = [
+         DroneConfig(drone_id="follower", start=[0, 0, 5], target=[8, 0, 5]),
+         DroneConfig(drone_id="leader", start=[3, 0, 5], target=[11, 0, 5]),
+      ]
+      sim = Simulator.from_config(self._cfg(drones, camera_enabled=True, camera_async=False, camera_fov_deg=60.0))
+
+      try:
+         for _ in range(5):
+            sim.step()
+
+         assert list(sim._perception_mailbox.latest("follower")) == ["leader"]
+         assert sim._perception_mailbox.latest("leader") == {}
+      finally:
+         sim.close()
+
+   def test_rendered_view_reaches_the_view_store(self):
+      """Test the REST pickup point ends up holding a real PNG, which is all the detector can fetch."""
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False, camera_backend="rest", camera_render_images=True,
+                                            camera_fov_deg=180.0))
+
+      try:
+         sim.step()
+
+         view = sim._perception_view_store.latest("d1")
+         assert view.image_png.startswith(b"\x89PNG")
+         assert [v.drone_id for v in view.visible] == ["d2"]
+      finally:
+         sim.close()
+
+   # --- handover to the coordinator ---
+
+   def test_coordinator_gets_the_mailbox_only_with_feeds_dmpc(self):
+      """Test the flag that decides whether perception observes or steers."""
+      recorder = _RecordingCoordinator()
+
+      passive = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False))
+      passive.coordinator = recorder
+      try:
+         passive.step()
+      finally:
+         passive.close()
+      assert recorder.seen == [None]
+
+      recorder.seen.clear()
+      feeding = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False, camera_feeds_dmpc=True))
+      feeding.coordinator = recorder
+      try:
+         feeding.step()
+      finally:
+         feeding.close()
+      assert recorder.seen == [feeding._perception_mailbox]
+
+   def test_coordinator_gets_none_without_a_camera(self):
+      """Test the kwarg is passed unconditionally, so every coordinator sees it — as None by default."""
+      recorder = _RecordingCoordinator()
+      sim = Simulator.from_config(self._cfg())
+      sim.coordinator = recorder
+
+      sim.step()
+
+      assert recorder.seen == [None]
+
+   # --- lifecycle ---
+
+   def test_close_stops_the_worker_thread(self):
+      import threading
+
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=True))
+      worker = sim._perception_worker
+      assert worker.is_running is True
+
+      sim.close()
+
+      assert worker.is_running is False
+      assert not [t for t in threading.enumerate() if t.name == "PerceptionWorker"]
+
+   def test_close_is_idempotent(self):
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False))
+
+      sim.close()
+      sim.close()  # must not raise
+
+      assert sim._perception_worker is None
+
+   def test_close_without_a_camera_is_a_noop(self):
+      Simulator.from_config(self._cfg()).close()  # must not raise
+
+   def test_stepping_after_close_still_works(self):
+      """Test closing releases the thread without breaking the simulation — it just stops observing."""
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False, camera_fov_deg=180.0))
+      sim.step()
+      before = dict(sim._perception_mailbox.latest("d1"))
+
+      sim.close()
+      sim.step()
+
+      assert sim.step_count == 2
+      assert sim._perception_mailbox.latest("d1")["d2"].captured_step == before["d2"].captured_step
+
+
+class _RecordingCoordinator:
+   """Coordinator stand-in that only remembers what ``perception_mailbox`` it was handed each step."""
+
+   def __init__(self) -> None:
+      self.seen: list[object] = []
+
+   def solve_controls(self, *, drones, obstacles, room_min=None, room_max=None, lstm_provider=None, perception_mailbox=None):
+      self.seen.append(perception_mailbox)
+      return {}

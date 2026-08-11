@@ -66,6 +66,17 @@ class Simulator:
    # BoF (Backoff-Function) trajectory/uncertainty provider (None when not configured).
    _bof_provider: object | None = field(default=None, init=False, repr=False)
    _bof_history: object | None = field(default=None, init=False, repr=False)
+   # Camera perception pipeline (all off/None unless the scenario sets `camera_enabled`).
+   # `_perception_view_store`, `_perception_mailbox` and `_camera_expose_truth` are read off the
+   # simulation by getattr in `api/perception_router.py` — renaming one here silently turns the
+   # detector's endpoints back into 409s.
+   _perception_mailbox: object | None = field(default=None, init=False, repr=False)
+   _perception_view_store: object | None = field(default=None, init=False, repr=False)
+   _perception_worker: object | None = field(default=None, init=False, repr=False)
+   _camera_model: object | None = field(default=None, init=False, repr=False)
+   _camera_feeds_dmpc: bool = field(default=False, init=False, repr=False)
+   _camera_rate_steps: int = field(default=1, init=False, repr=False)
+   _camera_expose_truth: bool = field(default=False, init=False, repr=False)
 
    @classmethod
    def from_config(cls, cfg: ScenarioConfig) -> "Simulator":
@@ -196,6 +207,45 @@ class Simulator:
             horizon=_mpc_horizon,
          )
 
+      # Camera perception. Builds the chain capture -> (render) -> detector -> PerceptionMailbox; whether
+      # that mailbox then also replaces the DMPC broadcasts is `camera_feeds_dmpc` and is decided per step
+      # below. Without `camera_enabled` not a single object here exists and the simulation runs exactly as
+      # it did before this feature — the reason every flag defaults to off.
+      if getattr(cfg, "camera_enabled", False):
+         from drone_sim.perception import (CameraModel, CameraView, CameraViewStore, PerceptionMailbox, PerceptionWorker, StubPerceptionAdapter,
+                                           render_fpv_png, )
+
+         sim._camera_model = CameraModel(fov_deg=cfg.camera_fov_deg, range_m=cfg.camera_range)
+         sim._perception_mailbox = PerceptionMailbox()
+         sim._camera_feeds_dmpc = bool(cfg.camera_feeds_dmpc)
+         sim._camera_rate_steps = int(cfg.camera_rate_steps)
+         sim._camera_expose_truth = bool(cfg.camera_expose_truth)
+
+         # Obstacles and the drone_id -> DroneModel mapping are constant over a run, so the renderer closes
+         # over them once instead of every CameraView carrying them. Only resolved DroneModel objects go in:
+         # the closure runs on the worker thread and must not reach back into config or the file system.
+         _renderer = None
+         if cfg.camera_render_images:
+            _obstacles_for_render = sim.obstacles
+            _models_for_render = {d.drone_id: d.model for d in sim.drones}
+
+            def _render_view(view: CameraView) -> bytes:
+               return render_fpv_png(view, _obstacles_for_render, models=_models_for_render)
+
+            _renderer = _render_view
+
+         # "stub" detects in-process on the worker thread; "rest" only renders and parks the view for the
+         # external detector, which pushes its estimates into the same mailbox through the API router.
+         # The config validator guarantees `camera_render_images` for the "rest" backend, so the store
+         # never fills with image-less views.
+         _adapter = StubPerceptionAdapter(noise_sigma=cfg.camera_noise_sigma) if cfg.camera_backend == "stub" else None
+         if cfg.camera_backend == "rest":
+            sim._perception_view_store = CameraViewStore()
+
+         sim._perception_worker = PerceptionWorker(sim._perception_mailbox, adapter=_adapter, renderer=_renderer,
+                                                   view_store=sim._perception_view_store, async_mode=cfg.camera_async)
+         sim._perception_worker.start()
+
       # Initialize traces with the start positions.
       sim.traces = {d.drone_id: [d.position().copy()] for d in sim.drones}
       sim.last_collisions = sim._compute_collisions()
@@ -235,6 +285,40 @@ class Simulator:
 
       return events
 
+   def _capture_perception(self) -> None:
+      """Take one camera view per drone and hand the whole batch to the perception worker.
+
+      A no-op unless the scenario enabled the camera. Captures run every ``camera_rate_steps``-th step; in
+      between, the estimates from the last capture simply stay in the mailbox (``post`` upserts and nothing
+      expires), so a slow camera means older neighbor data, never missing data.
+
+      The batch goes over in one :meth:`~drone_sim.perception.worker.PerceptionWorker.submit`, which never
+      blocks: asynchronously it is queued (dropping a batch that is still waiting), synchronously it is
+      detected right here. Views are self-contained copies, so the worker thread reading one cannot race the
+      state updates at the end of this step.
+      """
+      if self._perception_worker is None or self.step_count % self._camera_rate_steps != 0:
+         return
+
+      views = [self._camera_model.capture(d, self.drones, step=self.step_count, sim_time=self.t) for d in self.drones]
+      self._perception_worker.submit(views)
+
+   def close(self) -> None:
+      """Release the background resources of this simulation. Idempotent.
+
+      Today that is the perception worker thread. It is a daemon, so forgetting this call never keeps the
+      process alive — but a GUI that reloads scenarios would accumulate one live thread (and one rendering
+      pipeline) per reload, which is why :class:`~drone_sim.gui.direct_backend.DirectBackend` closes the old
+      simulation before replacing it.
+
+      The mailbox and the view store survive on purpose: a detector may still be reading them over REST, and
+      they hold no thread. A closed simulation can still be stepped, it just stops capturing.
+      """
+      worker = self._perception_worker
+      self._perception_worker = None
+      if worker is not None:
+         worker.stop()
+
    def step(self) -> None:
       t0 = time.perf_counter()
       try:
@@ -252,6 +336,10 @@ class Simulator:
          positions = [d.position().copy() for d in self.drones]
          velocities = [d.velocity().copy() for d in self.drones]
          prefs = [d.route.current_ref().copy() for d in self.drones]
+
+         # Capture before the solve, not after: with `camera_async=false` the worker detects inline, so
+         # this step's estimates are in the mailbox by the time the coordinator reads it below.
+         self._capture_perception()
 
          # This build expects a centralized MPC coordinator.
          # All Paper/"basic_paper" configs provide `coordinator: {"type": "mpc_central", ...}`.
@@ -275,7 +363,10 @@ class Simulator:
             self._bof_provider.clear_step_cache()
          try:
             u_by_id = self.coordinator.solve_controls(drones=self.drones, obstacles=self.obstacles, room_min=self.room_min, room_max=self.room_max,
-                  lstm_provider=(self._bof_provider or self._lstm_provider), )
+                  lstm_provider=(self._bof_provider or self._lstm_provider),
+                  # Only `camera_feeds_dmpc` hands the mailbox over; otherwise perception observes passively and
+                  # the coordinators keep negotiating on true states exactly as before.
+                  perception_mailbox=(self._perception_mailbox if self._camera_feeds_dmpc else None), )
 
          except RuntimeError as exc:
             # Mark the step as infeasible (e.g. walls/obstacles make the optimization problem infeasible) and abort this step without advancing the

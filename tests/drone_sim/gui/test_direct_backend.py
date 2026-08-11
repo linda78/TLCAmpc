@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 import numpy as np
 
@@ -382,3 +383,99 @@ def test_reset_keeps_override(two_drone_backend: DirectBackend, monkeypatch: pyt
     two_drone_backend.reset()
     assert two_drone_backend._model_override is OBJ_MODEL
     assert all(m is OBJ_MODEL for m in _captured_models(two_drone_backend, monkeypatch).values())
+
+
+# --- perception lifecycle (risk R2: one worker thread per reload) ---
+
+CAMERA_CONFIG = {
+    **TWO_DRONE_CONFIG,
+    "camera_enabled": True,
+    "camera_async": True,
+}
+
+
+@pytest.fixture
+def camera_config_file(tmp_path: Path) -> Path:
+    p = tmp_path / "camera.json"
+    p.write_text(json.dumps(CAMERA_CONFIG), encoding="utf-8")
+    return p
+
+
+def _worker_threads() -> list[threading.Thread]:
+    return [t for t in threading.enumerate() if t.name == "PerceptionWorker"]
+
+
+def test_load_config_starts_one_worker(camera_config_file: Path) -> None:
+    backend = DirectBackend()
+    try:
+        backend.load_config(camera_config_file)
+        assert len(_worker_threads()) == 1
+    finally:
+        backend.close()
+
+
+def test_reloading_does_not_accumulate_workers(camera_config_file: Path) -> None:
+    """R2: the daemon flag only guarantees the process can exit, not that the old worker stops working."""
+    backend = DirectBackend()
+    try:
+        for _ in range(3):
+            backend.load_config(camera_config_file)
+
+        assert len(_worker_threads()) == 1
+    finally:
+        backend.close()
+
+
+def test_reset_does_not_accumulate_workers(camera_config_file: Path) -> None:
+    backend = DirectBackend()
+    try:
+        backend.load_config(camera_config_file)
+        backend.step()
+        for _ in range(3):
+            backend.reset()
+
+        assert len(_worker_threads()) == 1
+    finally:
+        backend.close()
+
+
+def test_reset_leaves_a_working_camera(camera_config_file: Path) -> None:
+    """Closing the outgoing simulation must not cost the incoming one its perception."""
+    backend = DirectBackend()
+    try:
+        backend.load_config(camera_config_file)
+        backend.reset()
+        backend.step()
+
+        worker = backend._sim._perception_worker
+        assert worker is not None and worker.is_running is True
+    finally:
+        backend.close()
+
+
+def test_close_stops_the_worker(camera_config_file: Path) -> None:
+    backend = DirectBackend()
+    backend.load_config(camera_config_file)
+
+    backend.close()
+
+    assert _worker_threads() == []
+
+
+def test_close_is_idempotent_with_a_camera(camera_config_file: Path) -> None:
+    backend = DirectBackend()
+    backend.load_config(camera_config_file)
+
+    backend.close()
+    backend.close()  # must not raise
+
+    assert _worker_threads() == []
+
+
+def test_close_without_a_camera_scenario(config_file: Path) -> None:
+    backend = DirectBackend()
+    backend.load_config(config_file)
+
+    backend.close()  # must not raise
+
+    assert backend._sim is not None  # the state stays readable after the window closes

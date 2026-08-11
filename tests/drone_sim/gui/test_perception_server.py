@@ -11,6 +11,7 @@ import json
 import logging
 import socket
 import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -223,16 +224,26 @@ def test_rest_scenario_starts_a_server(rest_config_file: Path) -> None:
 
 
 def test_backend_server_answers_over_http(rest_config_file: Path) -> None:
+    """End to end through the GUI host: the simulator's view store is what the detector reaches over HTTP."""
     backend = DirectBackend()
     try:
         backend.load_config(rest_config_file)
         server = backend._perception_server
         assert server.wait_started(timeout=5.0)
 
+        # Loaded but not stepped: the store exists (200, not the pre-wiring 409) and is simply empty.
         response = get(server, "/perception/views")
+        assert response.status_code == 200
+        assert response.json()["views"] == []
 
-        # 409 until the simulator wiring installs the view store; the seam itself is live.
-        assert response.status_code == 409
+        backend.step()
+
+        # The worker renders on its own thread, so the capture appears shortly after the step, not during it.
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not get(server, "/perception/views").json()["views"]:
+            time.sleep(0.02)
+
+        assert [v["observer_id"] for v in get(server, "/perception/views").json()["views"]] == ["d1"]
     finally:
         backend.close()
 

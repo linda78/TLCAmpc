@@ -38,6 +38,7 @@ class DirectBackend(SimulationBackend):
       cfg = ScenarioConfig.model_validate(cfg_json)
       self._cfg = cfg
       self._config_path = Path(path)
+      self._close_sim()
       self._sim = Simulator.from_config(cfg)
       self._camera = self._make_camera()
       # The new scenario has just stated what its drones look like; a model picked for the previous one no longer applies.
@@ -60,6 +61,7 @@ class DirectBackend(SimulationBackend):
       if self._cfg is None:
          raise RuntimeError("Call load_config() before reset()")
       # Uses CACHED config — does NOT re-read from disk
+      self._close_sim()
       self._sim = Simulator.from_config(self._cfg)
       self._camera = self._make_camera()
       # _model_override survives on purpose: a reset repeats the run, not the choice of what to look at.
@@ -92,14 +94,29 @@ class DirectBackend(SimulationBackend):
       return render_fpv_png(view, self._sim.obstacles, models=self._display_models(), size=size)
 
    def close(self) -> None:
-      """Stop the perception API thread. Idempotent, safe to call without a loaded config."""
+      """Stop the perception API thread and the current simulation's background work.
+
+      Idempotent, safe to call without a loaded config. The simulation object itself is kept — closing the
+      window is not a reason for the last :meth:`get_state` to start failing.
+      """
       if self._perception_server is not None:
          self._perception_server.stop()
          self._perception_server = None
+      self._close_sim()
 
    # ------------------------------------------------------------------ #
    # Private helpers                                                      #
    # ------------------------------------------------------------------ #
+
+   def _close_sim(self) -> None:
+      """Release the background resources of the simulation currently held, if any.
+
+      Called before every replacement of ``self._sim``: the perception worker of the outgoing simulation runs
+      on its own thread, and without this a reload or reset would leave one running per scenario ever loaded.
+      Being a daemon thread only guarantees the process can still exit, not that it stops working.
+      """
+      if self._sim is not None:
+         self._sim.close()
 
    def _make_camera(self) -> CameraModel:
       return CameraModel(fov_deg=self._cfg.camera_fov_deg, range_m=self._cfg.camera_range)
