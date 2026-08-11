@@ -7,6 +7,7 @@ import numpy as np
 
 import pytest
 
+from drone_sim.domain.drone_model import resolve_drone_model
 from drone_sim.gui.backend import DroneState, SimState, StepResult
 from drone_sim.gui.direct_backend import DirectBackend
 
@@ -310,3 +311,74 @@ def test_render_fpv_before_load_raises() -> None:
     backend = DirectBackend()
     with pytest.raises(RuntimeError):
         backend.render_fpv("d1", (160, 120))
+
+
+# --- set_drone_model_override ---
+#
+# The runtime "OBJ Model" button. The bug it fixes: the button used to reach only the external 3D view,
+# so the drone view kept drawing spheres while the overview drew a mesh.
+
+OBJ_MODEL = resolve_drone_model("obj", "drone_costum_0_0_5.obj")
+
+
+def _captured_models(backend: DirectBackend, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Render one frame with the PNG writer stubbed out, and return the ``models`` mapping it was handed."""
+    seen: dict = {}
+
+    def fake_render(view, obstacles, *, models=None, size=(320, 240)):
+        seen.update(models or {})
+        return b"\x89PNG\r\n\x1a\n"
+
+    monkeypatch.setattr("drone_sim.gui.direct_backend.render_fpv_png", fake_render)
+    backend.render_fpv("d1", (160, 120))
+    return seen
+
+
+def test_model_override_defaults_to_none(two_drone_backend: DirectBackend) -> None:
+    assert two_drone_backend._model_override is None
+
+
+def test_without_override_fpv_uses_configured_models(two_drone_backend: DirectBackend, monkeypatch: pytest.MonkeyPatch) -> None:
+    """TWO_DRONE_CONFIG sets no drone_model, so every drone resolves to a sphere — and that is what gets drawn."""
+    models = _captured_models(two_drone_backend, monkeypatch)
+    assert set(models) == {"d1", "d2"}
+    assert all(m.kind == "sphere" for m in models.values())
+
+
+def test_override_applies_to_every_drone(two_drone_backend: DirectBackend, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fleet-wide by design: pressing the button once makes the whole swarm homogeneous."""
+    two_drone_backend.set_drone_model_override(OBJ_MODEL)
+    models = _captured_models(two_drone_backend, monkeypatch)
+    assert set(models) == {"d1", "d2"}
+    assert all(m is OBJ_MODEL for m in models.values())
+
+
+def test_clearing_override_restores_configured_models(two_drone_backend: DirectBackend, monkeypatch: pytest.MonkeyPatch) -> None:
+    two_drone_backend.set_drone_model_override(OBJ_MODEL)
+    two_drone_backend.set_drone_model_override(None)
+    models = _captured_models(two_drone_backend, monkeypatch)
+    assert all(m.kind == "sphere" for m in models.values())
+
+
+def test_override_changes_the_rendered_image(two_drone_backend: DirectBackend) -> None:
+    """End-to-end through the real renderer: a mesh is not the same picture as a sphere."""
+    sphere_png = two_drone_backend.render_fpv("d1", (160, 120))
+    two_drone_backend.set_drone_model_override(OBJ_MODEL)
+    obj_png = two_drone_backend.render_fpv("d1", (160, 120))
+    assert obj_png != sphere_png
+
+
+def test_load_config_drops_override(two_drone_backend: DirectBackend, config_file: Path) -> None:
+    """A newly loaded scenario has just said what its drones look like — the previous pick no longer applies."""
+    two_drone_backend.set_drone_model_override(OBJ_MODEL)
+    two_drone_backend.load_config(config_file)
+    assert two_drone_backend._model_override is None
+
+
+def test_reset_keeps_override(two_drone_backend: DirectBackend, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reset repeats the run, not the choice of what to look at."""
+    two_drone_backend.set_drone_model_override(OBJ_MODEL)
+    two_drone_backend.step()
+    two_drone_backend.reset()
+    assert two_drone_backend._model_override is OBJ_MODEL
+    assert all(m is OBJ_MODEL for m in _captured_models(two_drone_backend, monkeypatch).values())

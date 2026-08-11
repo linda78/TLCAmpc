@@ -5,6 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
+from drone_sim.domain.drone_model import DroneModel
+
 
 @dataclass
 class DroneState:
@@ -86,6 +88,24 @@ class SimulationBackend(ABC):
     @abstractmethod
     def reset(self) -> None:
         """Reset simulation to initial state from the last loaded config."""
+        ...
+
+    @abstractmethod
+    def set_drone_model_override(self, model: DroneModel | None) -> None:
+        """Draw *every* drone as ``model`` from now on, ignoring what the scenario configured. ``None`` restores the config.
+
+        This is the runtime counterpart to ``drone_model``/``drone_model_path``: a way to try meshes out without
+        writing a scenario file for each one. It is deliberately fleet-wide — while it is set the swarm is
+        homogeneous — and deliberately temporary:
+
+        * ``load_config`` drops it, because the scenario just said what its drones look like.
+        * ``reset`` keeps it, because a reset repeats the run, not the choice of what to look at.
+
+        Implementations must apply it to *all* views they serve, :meth:`render_fpv` included. An override that
+        reaches only some of them is exactly what this method exists to prevent.
+
+        :param model: Resolved model to draw every drone with, or ``None`` to fall back to each drone's own.
+        """
         ...
 
     @abstractmethod

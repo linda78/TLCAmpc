@@ -397,6 +397,125 @@ class TestFpvView:
         assert not list((Path(tmp_path) / "screenshots").glob("*.json"))
 
 
+class TestObjModelOverride:
+    """The 'OBJ Model' button as a temporary override of the config — for *every* view, not just the external one.
+
+    Before this, the button fed ``main_window._obj_path`` (external view) while the drone view read
+    ``Drone.model`` from the config, so the same neighbor could be a mesh in one view and a sphere in the other.
+    """
+
+    ASSET = "drone_costum_0_0_5.obj"  # small enough to parse per frame in a test
+
+    @pytest.fixture
+    def loaded_window(self, window, tmp_path):
+        import json
+        from pathlib import Path
+
+        path = Path(tmp_path) / "obj_scenario.json"
+        path.write_text(json.dumps(TestFpvView.FPV_CONFIG), encoding="utf-8")
+        window._backend.load_config(path)
+        window._redraw(window._backend.step())
+        window._on_config_loaded(window._backend.get_state())
+        return window
+
+    @staticmethod
+    def _pick(monkeypatch, path_str: str) -> None:
+        """Make the next file dialog return ``path_str`` ('' = the user pressed Cancel)."""
+        import drone_sim.gui.main_window as m
+        monkeypatch.setattr(m.QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (path_str, "")))
+
+    @staticmethod
+    def _asset_path() -> str:
+        from drone_sim.domain.drone_model import ASSETS_DIR
+        return str(ASSETS_DIR / TestObjModelOverride.ASSET)
+
+    def test_no_override_by_default(self, loaded_window):
+        assert loaded_window._obj_path is None
+        assert loaded_window._backend._model_override is None
+        assert loaded_window._obj_model_label.text() == "Model: scatter"
+
+    def test_button_sets_override_on_the_backend(self, loaded_window, monkeypatch):
+        self._pick(monkeypatch, self._asset_path())
+        loaded_window._on_select_obj_model()
+
+        override = loaded_window._backend._model_override
+        assert override is not None
+        assert override.kind == "obj"
+        assert override.path.name == self.ASSET
+
+    def test_button_updates_external_view_state_and_label(self, loaded_window, monkeypatch):
+        self._pick(monkeypatch, self._asset_path())
+        loaded_window._on_select_obj_model()
+
+        assert loaded_window._obj_path is not None
+        assert loaded_window._obj_path.name == self.ASSET
+        assert "drone_costum_0_0_5" in loaded_window._obj_model_label.text()
+
+    def test_button_reaches_the_drone_view(self, loaded_window, monkeypatch):
+        """The actual fix: pressing the button while a drone view is showing must change that image."""
+        loaded_window._view_combo.setCurrentIndex(1)
+        before = loaded_window._fpv_label.pixmap().toImage()
+
+        self._pick(monkeypatch, self._asset_path())
+        loaded_window._on_select_obj_model()
+
+        assert loaded_window._fpv_label.pixmap().toImage() != before
+
+    def test_cancel_clears_the_override(self, loaded_window, monkeypatch):
+        self._pick(monkeypatch, self._asset_path())
+        loaded_window._on_select_obj_model()
+
+        self._pick(monkeypatch, "")
+        loaded_window._on_select_obj_model()
+
+        assert loaded_window._obj_path is None
+        assert loaded_window._backend._model_override is None
+        assert loaded_window._obj_model_label.text() == "Model: scatter"
+
+    def test_unreadable_obj_warns_and_keeps_the_current_pick(self, loaded_window, monkeypatch, tmp_path):
+        """A broken file is an error, not a request to go back to spheres — and it must not reach the renderer."""
+        import drone_sim.gui.main_window as m
+        warnings = []
+        monkeypatch.setattr(m.QMessageBox, "warning", staticmethod(lambda *a, **k: warnings.append(a)))
+
+        self._pick(monkeypatch, self._asset_path())
+        loaded_window._on_select_obj_model()
+        good = loaded_window._backend._model_override
+
+        self._pick(monkeypatch, str(tmp_path / "does_not_exist.obj"))
+        loaded_window._on_select_obj_model()
+
+        assert len(warnings) == 1
+        assert loaded_window._backend._model_override is good
+        assert loaded_window._obj_path.name == self.ASSET
+
+    def test_reset_keeps_the_override(self, loaded_window, monkeypatch):
+        """Reset repeats the run, not the choice of what to look at (existing behaviour, now on both views)."""
+        self._pick(monkeypatch, self._asset_path())
+        loaded_window._on_select_obj_model()
+
+        loaded_window._on_reset()
+
+        assert loaded_window._obj_path is not None
+        assert loaded_window._backend._model_override is not None
+
+    def test_loading_a_config_drops_the_override(self, loaded_window, monkeypatch, tmp_path):
+        import json
+        from pathlib import Path
+
+        self._pick(monkeypatch, self._asset_path())
+        loaded_window._on_select_obj_model()
+
+        path = Path(tmp_path) / "reload.json"
+        path.write_text(json.dumps(TestFpvView.FPV_CONFIG), encoding="utf-8")
+        self._pick(monkeypatch, str(path))
+        loaded_window._on_open_file()
+
+        assert loaded_window._obj_path is None
+        assert loaded_window._backend._model_override is None
+        assert loaded_window._obj_model_label.text() == "Model: scatter"
+
+
 class TestShutdown:
     """closeEvent releases what the backend started in the background."""
 

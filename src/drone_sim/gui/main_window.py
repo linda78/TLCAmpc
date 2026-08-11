@@ -11,6 +11,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
+from drone_sim.domain.drone_model import DroneModel, resolve_drone_model
 from drone_sim.gui.backend import StepResult, SimState
 from drone_sim.gui.direct_backend import DirectBackend
 from drone_sim.api.utils.render_helper import draw_room_wireframe, draw_sphere_wireframe, draw_trace, draw_obstacles, draw_obj_mesh, draw_prediction_tube
@@ -54,6 +55,8 @@ class MainWindow(QMainWindow):
         self._traces: dict[str, list[list[float]]] = {}
         self._zoom: float = 1.0  # <1 zoomed in, >1 zoomed out; applied to room limits
         self._run_to_completion: bool = False
+        # GUI-side mirror of the backend's fleet-wide model override — the external view draws straight from it,
+        # the drone view goes through the backend. None = no override, i.e. whatever the scenario configured.
         self._obj_path: Path | None = None  # path to .obj file for 3D drone model
         self._obj_scale: float = 0.3  # scale of the OBJ model in world units
         self._last_result: StepResult | None = None
@@ -178,6 +181,9 @@ class MainWindow(QMainWindow):
         self._playing = False
         self._traces = {}
         self._zoom = 1.0
+        # load_config already dropped the override inside the backend; mirror that here. Not via
+        # _apply_drone_model_override — that would repaint the *previous* scenario's result against the new sim.
+        self._show_drone_model_override(None)
         # Call step() once to get initial drone positions for first render.
         # (SimState from load_config has counts only, no per-drone positions.)
         # Research note (open question 3): simplest approach is one probe step on load.
@@ -437,19 +443,49 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _on_select_obj_model(self) -> None:
-        """Open a file dialog to select an .obj file for 3D drone rendering.
-        Selecting 'Cancel' reverts to the default scatter marker."""
+        """Pick an .obj file to draw *every* drone with, in every view. 'Cancel' reverts to the configured models.
+
+        The override is temporary by design — it exists so meshes can be tried out without writing a scenario
+        file per model, and it is dropped again the next time a config is loaded (but survives a reset).
+
+        The path goes through :func:`resolve_drone_model`, the same check the config layer runs, so an
+        unreadable .obj surfaces as one dialog here rather than a log line per rendered frame. A rejected file
+        leaves the current selection alone: it is an error, not a request to go back to spheres.
+        """
         utils_dir = str(Path(__file__).resolve().parent.parent / "resources" / "assets")
         path_str, _ = QFileDialog.getOpenFileName(
             self, "Select OBJ Model", utils_dir, "OBJ Files (*.obj)"
         )
-        if path_str:
-            self._obj_path = Path(path_str)
-            self._obj_model_label.setText(f"Model: {self._obj_path.stem}")
+        if not path_str:
+            self._apply_drone_model_override(None)
+            return
+
+        try:
+            model = resolve_drone_model("obj", path_str)
+        except ValueError as exc:
+            QMessageBox.warning(self, "OBJ Model", f"Cannot use this model:\n{exc}")
+            return
+
+        self._apply_drone_model_override(model)
+
+    def _apply_drone_model_override(self, model: DroneModel | None) -> None:
+        """Push the override to the backend, update the GUI's own copy, and repaint whichever view is showing.
+
+        Repainting via ``_redraw`` rather than ``draw_idle`` is what makes the change visible immediately in
+        *both* views: ``draw_idle`` only re-renders the artists already on the 3D canvas, and would not touch
+        the drone view at all.
+        """
+        self._backend.set_drone_model_override(model)
+        self._show_drone_model_override(model)
+        if self._last_result is not None:
+            self._redraw(self._last_result)
         else:
-            self._obj_path = None
-            self._obj_model_label.setText("Model: scatter")
-        self._canvas.draw_idle()
+            self._canvas.draw_idle()
+
+    def _show_drone_model_override(self, model: DroneModel | None) -> None:
+        """Update the GUI-side copy of the override (path for the external view, label for the user). No repaint."""
+        self._obj_path = model.path if model is not None else None
+        self._obj_model_label.setText(f"Model: {self._obj_path.stem}" if self._obj_path is not None else "Model: scatter")
 
     # ------------------------------------------------------------------ #
     # Screenshot                                                           #

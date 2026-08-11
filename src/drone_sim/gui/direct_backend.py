@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from drone_sim.domain.config import ScenarioConfig
+from drone_sim.domain.drone_model import DroneModel
 from drone_sim.perception import CameraModel, render_fpv_png
 from drone_sim.simulation.simulator import Simulator
 from drone_sim.gui.backend import (SimulationBackend, SimState, DroneState, StepResult, PredictedTrajectory, )
@@ -24,6 +25,9 @@ class DirectBackend(SimulationBackend):
       # Started on the first REST-perception scenario and then kept alive across reloads — the router
       # resolves the simulation per request, so a detector connection survives a reset. See close().
       self._perception_server: object | None = None
+      # Runtime display override for the whole fleet. Dropped by load_config, kept by reset —
+      # see SimulationBackend.set_drone_model_override.
+      self._model_override: DroneModel | None = None
 
    # ------------------------------------------------------------------ #
    # Public API                                                           #
@@ -36,6 +40,8 @@ class DirectBackend(SimulationBackend):
       self._config_path = Path(path)
       self._sim = Simulator.from_config(cfg)
       self._camera = self._make_camera()
+      # The new scenario has just stated what its drones look like; a model picked for the previous one no longer applies.
+      self._model_override = None
       self._ensure_perception_server(cfg)
       return self._make_sim_state()
 
@@ -56,6 +62,15 @@ class DirectBackend(SimulationBackend):
       # Uses CACHED config — does NOT re-read from disk
       self._sim = Simulator.from_config(self._cfg)
       self._camera = self._make_camera()
+      # _model_override survives on purpose: a reset repeats the run, not the choice of what to look at.
+
+   def set_drone_model_override(self, model: DroneModel | None) -> None:
+      """Draw every drone as ``model`` until the next ``load_config``; ``None`` restores the configured models.
+
+      Storing the resolved :class:`DroneModel` rather than a path keeps the "does this file exist and parse"
+      question where a human can answer it — the file dialog — instead of in the renderer, once per frame.
+      """
+      self._model_override = model
 
    def render_fpv(self, drone_id: str, size: tuple[int, int]) -> bytes | None:
       """Render ``drone_id``'s pinhole camera image of the current simulation state.
@@ -74,7 +89,7 @@ class DirectBackend(SimulationBackend):
       if drone is None:
          return None
       view = self._camera.capture(drone, self._sim.drones, step=self._sim.step_count, sim_time=self._sim.t)
-      return render_fpv_png(view, self._sim.obstacles, models={d.drone_id: d.model for d in self._sim.drones}, size=size)
+      return render_fpv_png(view, self._sim.obstacles, models=self._display_models(), size=size)
 
    def close(self) -> None:
       """Stop the perception API thread. Idempotent, safe to call without a loaded config."""
@@ -88,6 +103,15 @@ class DirectBackend(SimulationBackend):
 
    def _make_camera(self) -> CameraModel:
       return CameraModel(fov_deg=self._cfg.camera_fov_deg, range_m=self._cfg.camera_range)
+
+   def _display_models(self) -> dict[str, DroneModel]:
+      """``drone_id -> DroneModel`` for the renderers: the runtime override for everyone, else each drone's configured model.
+
+      The override deliberately wins for the whole fleet at once, so a heterogeneous scenario reads as homogeneous while it is set.
+      """
+      if self._model_override is not None:
+         return {d.drone_id: self._model_override for d in self._sim.drones}
+      return {d.drone_id: d.model for d in self._sim.drones}
 
    def _ensure_perception_server(self, cfg: ScenarioConfig) -> None:
       """Start the perception REST server once, for scenarios that ask the detector to pull images over HTTP.
