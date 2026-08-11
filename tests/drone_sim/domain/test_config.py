@@ -466,6 +466,35 @@ class TestScenarioConfigCamera:
       assert cfg.camera_render_images is False
       assert cfg.camera_async is True
       assert cfg.camera_feeds_dmpc is False
+      assert cfg.camera_adapter is None
+      assert cfg.camera_adapter_params == {}
+
+   def test_adapter_accepts_dotted_class_path(self):
+      cfg = self._cfg(camera_enabled=True, camera_adapter="my_project.detector:MyDetector",
+                      camera_adapter_params={"weights": "model.pt"})
+      assert cfg.camera_adapter == "my_project.detector:MyDetector"
+      assert cfg.camera_adapter_params == {"weights": "model.pt"}
+
+   def test_adapter_requires_module_colon_class_form(self):
+      # Only the shape is checked at config time — importing here would run third-party code inside validation.
+      for bad in ("my_project.detector.MyDetector", "MyDetector", "my_project.detector:", ":MyDetector", ""):
+         with pytest.raises(ValidationError, match="package.module:ClassName"):
+            self._cfg(camera_enabled=True, camera_adapter=bad)
+
+   def test_adapter_requires_camera_enabled(self):
+      with pytest.raises(ValidationError, match="camera_adapter requires camera_enabled"):
+         self._cfg(camera_adapter="my_project.detector:MyDetector")
+
+   def test_adapter_requires_stub_backend(self):
+      # "rest" hands its views to an out-of-process detector; an in-process class would be silently unused there.
+      with pytest.raises(ValidationError, match="camera_backend='stub'"):
+         self._cfg(camera_enabled=True, camera_backend="rest", camera_render_images=True,
+                   camera_adapter="my_project.detector:MyDetector")
+
+   def test_adapter_params_without_adapter_raises(self):
+      # Rather than silently ignoring them, which would look like the detector got its weights path.
+      with pytest.raises(ValidationError, match="camera_adapter_params requires camera_adapter"):
+         self._cfg(camera_enabled=True, camera_adapter_params={"weights": "model.pt"})
 
    def test_rest_backend_requires_render_images(self):
       # We serve rendered images for pickup; without them the detector has nothing to fetch.

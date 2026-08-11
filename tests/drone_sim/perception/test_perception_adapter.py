@@ -3,6 +3,7 @@
 Covers the seam between CameraView and PositionEstimate:
 - StubPerceptionAdapter: id pass-through, the noise-free path (exact ground truth, RNG untouched), seeded reproducibility, sigma reporting
 - Protocol conformance, including the duck-typed case that is the whole point of the module
+- load_adapter: resolving the ``camera_adapter`` class path a scenario names, and failing loudly at load time when it is wrong
 - one smoke test proving the estimates fit straight into the PerceptionMailbox
 
 There is no outbound HTTP adapter to test: the out-of-process detector is a client of our own REST API, so that seam is tested in the API layer.
@@ -13,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from drone_sim.perception.adapter import PerceptionAdapter, StubPerceptionAdapter
+from drone_sim.perception.adapter import PerceptionAdapter, StubPerceptionAdapter, load_adapter
 from drone_sim.perception.camera import CameraView, VisibleDrone
 from drone_sim.perception.mailbox import PerceptionMailbox
 
@@ -168,3 +169,74 @@ class TestAdapterFeedsMailbox:
       latest = mailbox.latest("ego")
       np.testing.assert_array_equal(latest["d1"].position, np.array([5.0, 0.0, 0.0]))
       assert latest["d1"].received_time > 0.0
+
+
+# ---------------------------------------------------------------------------
+# load_adapter: the config seam
+# ---------------------------------------------------------------------------
+
+class LoadableDetector:
+   """Stand-in for the separately developed detector, importable by class path like the real one will be."""
+
+   def __init__(self, weights: str = "default.pt", threshold: float = 0.5) -> None:
+      self.weights = weights
+      self.threshold = threshold
+
+   def detect(self, view):
+      return []
+
+
+class NotADetector:
+   """Has no detect() — the mistake load_adapter has to catch before the worker swallows it per view."""
+
+
+class TestLoadAdapter:
+   """Tests for resolving ``ScenarioConfig.camera_adapter`` into an instance.
+
+   Every failure must raise *here*, at scenario load: the perception worker isolates per-view exceptions by design, so a detector that only fails
+   later would show up as drones quietly flying blind rather than as an error.
+   """
+
+   def test_loads_class_by_path(self):
+      """Test the documented 'package.module:ClassName' form returns a usable instance."""
+      adapter = load_adapter(f"{__name__}:LoadableDetector")
+
+      assert isinstance(adapter, LoadableDetector)
+      assert isinstance(adapter, PerceptionAdapter)
+
+   def test_params_reach_the_constructor(self):
+      """Test camera_adapter_params become keyword arguments — this is how a detector gets its weights path."""
+      adapter = load_adapter(f"{__name__}:LoadableDetector", {"weights": "model.pt", "threshold": 0.9})
+
+      assert adapter.weights == "model.pt"
+      assert adapter.threshold == 0.9
+
+   def test_no_params_uses_constructor_defaults(self):
+      adapter = load_adapter(f"{__name__}:LoadableDetector", None)
+
+      assert adapter.weights == "default.pt"
+
+   @pytest.mark.parametrize("spec", ["my_project.detector.MyDetector", "MyDetector", "mod:", ":Cls", ""])
+   def test_malformed_spec_raises(self, spec):
+      """Test a path without the module:Class split is rejected with the expected form in the message."""
+      with pytest.raises(ValueError, match="package.module:ClassName"):
+         load_adapter(spec)
+
+   def test_unimportable_module_raises_with_the_spec(self):
+      """Test a typo in the module part names the offending string, not just an ImportError from deep inside importlib."""
+      with pytest.raises(ValueError, match="cannot import module"):
+         load_adapter("no_such_package.detector:MyDetector")
+
+   def test_missing_class_raises(self):
+      with pytest.raises(ValueError, match="has no 'NoSuchClass'"):
+         load_adapter(f"{__name__}:NoSuchClass")
+
+   def test_object_without_detect_raises_type_error(self):
+      """Test the protocol check catches a class that forgot detect() — otherwise it would fail once per capture, inside the worker's try/except."""
+      with pytest.raises(TypeError, match="not a PerceptionAdapter"):
+         load_adapter(f"{__name__}:NotADetector")
+
+   def test_constructor_errors_propagate(self):
+      """Test a detector that rejects its params fails at load; wrapping this would hide the detector's own message."""
+      with pytest.raises(TypeError):
+         load_adapter(f"{__name__}:LoadableDetector", {"nonexistent_param": 1})

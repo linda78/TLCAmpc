@@ -213,7 +213,7 @@ class Simulator:
       # it did before this feature — the reason every flag defaults to off.
       if getattr(cfg, "camera_enabled", False):
          from drone_sim.perception import (CameraModel, CameraView, CameraViewStore, PerceptionMailbox, PerceptionWorker, StubPerceptionAdapter,
-                                           render_fpv_png, )
+                                           load_adapter, render_fpv_png, )
 
          sim._camera_model = CameraModel(fov_deg=cfg.camera_fov_deg, range_m=cfg.camera_range)
          sim._perception_mailbox = PerceptionMailbox()
@@ -238,7 +238,15 @@ class Simulator:
          # external detector, which pushes its estimates into the same mailbox through the API router.
          # The config validator guarantees `camera_render_images` for the "rest" backend, so the store
          # never fills with image-less views.
-         _adapter = StubPerceptionAdapter(noise_sigma=cfg.camera_noise_sigma) if cfg.camera_backend == "stub" else None
+         #
+         # `camera_adapter` names the real detector for the in-process path; without it the built-in stub
+         # stands in. Resolving here rather than lazily means a bad class path is a scenario-load error —
+         # the worker swallows per-view exceptions by design, so a detector that fails to import later would
+         # show up only as drones flying blind. The validator has already pinned the backend to "stub".
+         _adapter = None
+         if cfg.camera_backend == "stub":
+            _adapter = (load_adapter(cfg.camera_adapter, cfg.camera_adapter_params) if getattr(cfg, "camera_adapter", None)
+                        else StubPerceptionAdapter(noise_sigma=cfg.camera_noise_sigma))
          if cfg.camera_backend == "rest":
             sim._perception_view_store = CameraViewStore()
 

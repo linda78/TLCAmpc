@@ -5,7 +5,8 @@ Everything upstream of this module produces a :class:`~drone_sim.perception.came
 
 - **in-process** — any object with ``detect(view) -> list[PositionEstimate]`` satisfies :class:`PerceptionAdapter` and can be handed to the perception
   worker directly. No inheritance, no registration; the duck type *is* the contract. This is the path for importing the detection project as a
-  library and calling its internal functions.
+  library and calling its internal functions. A scenario names its detector with ``camera_adapter: "package.module:ClassName"``, which
+  :func:`load_adapter` resolves at load time — so the same file runs in the GUI, in the REST host and in tests without any glue code.
 - **out-of-process** — the detector is an HTTP *client* of TLCAmpc's own REST API: it pulls rendered camera images and pushes the resulting estimates
   straight into the :class:`~drone_sim.perception.mailbox.PerceptionMailbox` (see :mod:`drone_sim.api.app`). That path does not touch this module.
 
@@ -23,9 +24,10 @@ Two assumptions are baked into the contract and worth stating out loud:
 """
 from __future__ import annotations
 
+import importlib
 import logging
-from collections.abc import Sequence
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from collections.abc import Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -53,6 +55,46 @@ class PerceptionAdapter(Protocol):
       :return: One estimate per detected neighbor, in arbitrary order; empty list when nothing is detected.
       """
       ...
+
+
+def load_adapter(spec: str, params: Mapping[str, Any] | None = None) -> PerceptionAdapter:
+   """Import and instantiate the detector named by ``spec``, for ``ScenarioConfig.camera_adapter``.
+
+   This is what lets the separately developed detector be selected from a scenario file instead of only from a hand-written script — the same
+   scenario then works in the GUI, in the REST host and in tests, and nobody has to reach into ``Simulator``'s private slots to swap the adapter.
+
+   Every failure raises, and raises *here*: resolution happens once at scenario load, so a typo in the class path is a startup error with the
+   offending string in hand, not a per-capture log line on the perception worker thread that leaves the drones quietly flying blind.
+
+   :param spec: ``"package.module:ClassName"``. The module must be importable from the running interpreter (installed, or on ``PYTHONPATH``).
+   :param params: Keyword arguments for the constructor, e.g. a weights path. ``None`` constructs with no arguments.
+   :return: The instantiated detector.
+   :raises ValueError: If ``spec`` is not of the form ``module:ClassName``, the module cannot be imported, or it has no such attribute.
+   :raises TypeError: If the instance has no ``detect`` method, i.e. does not satisfy :class:`PerceptionAdapter`.
+   """
+   module_name, sep, class_name = spec.partition(":")
+   if not sep or not module_name.strip() or not class_name.strip():
+      raise ValueError(f"camera_adapter must have the form 'package.module:ClassName', got {spec!r}")
+
+   try:
+      module = importlib.import_module(module_name.strip())
+   except ImportError as exc:
+      raise ValueError(f"camera_adapter {spec!r}: cannot import module '{module_name.strip()}' ({exc})") from exc
+
+   try:
+      factory = getattr(module, class_name.strip())
+   except AttributeError as exc:
+      raise ValueError(f"camera_adapter {spec!r}: module '{module_name.strip()}' has no '{class_name.strip()}'") from exc
+
+   adapter = factory(**dict(params or {}))
+
+   # runtime_checkable Protocols only test for the method's presence — enough to turn "forgot to name it detect()" into a startup error with a
+   # readable message instead of an AttributeError once per capture, swallowed by the worker's per-view try/except.
+   if not isinstance(adapter, PerceptionAdapter):
+      raise TypeError(f"camera_adapter {spec!r}: {type(adapter).__name__} has no detect(view) method, so it is not a PerceptionAdapter")
+
+   _log.info("Perception adapter loaded from config: %s (params=%s)", spec, dict(params or {}))
+   return adapter
 
 
 def _estimate_from_view(view: CameraView, observed_id: str, position: np.ndarray | Sequence[float],

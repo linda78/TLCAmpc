@@ -1,4 +1,4 @@
-from drone_sim.perception.adapter import PerceptionAdapter, StubPerceptionAdapter
+from drone_sim.perception.adapter import PerceptionAdapter, StubPerceptionAdapter, load_adapter
 from drone_sim.perception.bridge import feed_trajectory_mailbox
 from drone_sim.perception.camera import CameraModel, CameraView, VisibleDrone
 from drone_sim.perception.fpv_render import render_fpv_png
@@ -17,5 +17,6 @@ __all__ = [
    "StubPerceptionAdapter",
    "VisibleDrone",
    "feed_trajectory_mailbox",
+   "load_adapter",
    "render_fpv_png",
 ]

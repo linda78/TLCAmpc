@@ -14,6 +14,7 @@ import numpy as np
 from numpy.testing import assert_array_almost_equal
 
 from drone_sim.domain.config import (ControllerSpec, DroneConfig, ObstacleConfig, PhysicsSpec, RoomConfig, ScenarioConfig)
+from drone_sim.perception import StubPerceptionAdapter
 from drone_sim.simulation.simulator import Simulator
 
 
@@ -565,6 +566,27 @@ class TestSimulatorEdgeCases:
       assert pos[0] <= max_x + 1e-6
 
 
+class RecordingDetector:
+   """Stand-in for the separately developed video detector, loaded by class path like the real one will be.
+
+   Module-level on purpose: ``camera_adapter`` resolves through ``importlib``, so the class has to be reachable as
+   ``module:ClassName`` — a class nested inside a test method would not be.
+   """
+
+   def __init__(self, label: str = "default") -> None:
+      self.label = label
+      self.calls = 0
+      self.saw_images = False
+
+   def detect(self, view):
+      from drone_sim.perception import PositionEstimate
+
+      self.calls += 1
+      self.saw_images = self.saw_images or bool(view.image_png)
+      return [PositionEstimate(observer_id=view.observer_id, observed_id=v.drone_id, position=np.asarray(v.position, dtype=float),
+                               captured_step=view.step, captured_time=view.sim_time) for v in view.visible]
+
+
 class TestSimulatorPerceptionWiring:
    """Tests for the camera perception pipeline hanging off the simulator (step 8 of the perception plan).
 
@@ -630,6 +652,61 @@ class TestSimulatorPerceptionWiring:
       try:
          assert sim._perception_view_store is not None
          assert sim._perception_view_store.observers() == []
+      finally:
+         sim.close()
+
+   def test_camera_adapter_replaces_the_stub(self):
+      """Test a scenario can name the real detector, which is the whole point of the field.
+
+      Without it the in-process detector can only be installed by rebuilding the worker by hand, which does not
+      work in the GUI at all — it builds its own Simulator.
+      """
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False,
+                                            camera_adapter=f"{__name__}:RecordingDetector"))
+
+      try:
+         assert isinstance(sim._perception_worker._adapter, RecordingDetector)
+      finally:
+         sim.close()
+
+   def test_camera_adapter_params_reach_the_detector(self):
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False,
+                                            camera_adapter=f"{__name__}:RecordingDetector",
+                                            camera_adapter_params={"label": "from-config"}))
+
+      try:
+         assert sim._perception_worker._adapter.label == "from-config"
+      finally:
+         sim.close()
+
+   def test_camera_adapter_detects_and_fills_the_mailbox(self):
+      """Test the configured detector is actually driven by ``step`` and its estimates land where the DMPC reads them."""
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False, camera_fov_deg=180.0,
+                                            camera_render_images=True, camera_adapter=f"{__name__}:RecordingDetector"))
+
+      try:
+         sim.step()
+
+         detector = sim._perception_worker._adapter
+         # One call per drone, and the renderer ran before the detector: an image detector with image_png=None
+         # would be looking at nothing.
+         assert detector.calls == 2
+         assert detector.saw_images is True
+         assert set(sim._perception_mailbox.latest("d1")) == {"d2"}
+      finally:
+         sim.close()
+
+   def test_bad_camera_adapter_fails_at_load(self):
+      """Test a typo is a scenario-load error, not a per-capture log line the worker swallows."""
+      with pytest.raises(ValueError, match="cannot import module"):
+         Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False, camera_adapter="no_such_pkg:Detector"))
+
+   def test_without_camera_adapter_the_stub_still_runs(self):
+      """Regression: the default in-process path is unchanged by the new field."""
+      sim = Simulator.from_config(self._cfg(camera_enabled=True, camera_async=False))
+
+      try:
+         assert isinstance(sim._perception_worker._adapter, StubPerceptionAdapter)
       finally:
          sim.close()
 

@@ -184,6 +184,21 @@ class ScenarioConfig(BaseModel):
    # the server in that exchange — nothing here calls out to a foreign service.
    camera_backend: Literal["stub", "rest"] = "stub"
 
+   # Which in-process detector the "stub" backend runs, as
+   # ``"package.module:ClassName"``. None (default) keeps the built-in
+   # ``StubPerceptionAdapter`` (ground truth + ``camera_noise_sigma`` noise).
+   # This is the seam for the separately developed video detector when it is
+   # imported as a library instead of talking to us over REST: the class is
+   # imported and instantiated once in ``Simulator.from_config`` and must
+   # satisfy the ``PerceptionAdapter`` protocol, i.e. have ``detect(view)``.
+   # Only meaningful with ``camera_backend="stub"`` — the "rest" backend hands
+   # its views to an out-of-process detector instead.
+   camera_adapter: str | None = None
+
+   # Keyword arguments for the ``camera_adapter`` constructor (weights path,
+   # thresholds, ...). Only allowed together with ``camera_adapter``.
+   camera_adapter_params: dict[str, Any] = Field(default_factory=dict)
+
    # TCP port the perception endpoints are served on when the simulation is
    # driven by the GUI (which spins up its own uvicorn thread). Ignored when
    # the simulation runs inside ``drone_sim.api.app``, which already owns a
@@ -267,4 +282,18 @@ class ScenarioConfig(BaseModel):
          raise ValueError("camera_feeds_dmpc requires camera_enabled")
       if self.camera_render_images and not self.camera_enabled:
          raise ValueError("camera_render_images requires camera_enabled")
+
+      # Only the shape of the reference is checked here; importing it would run third-party code inside config validation, and on the Qt thread at
+      # that. Simulator.from_config resolves it — still at scenario load, so a typo surfaces there and not once per capture on the worker thread.
+      if self.camera_adapter is not None:
+         if not self.camera_enabled:
+            raise ValueError("camera_adapter requires camera_enabled")
+         if self.camera_backend != "stub":
+            raise ValueError("camera_adapter requires camera_backend='stub' (the in-process adapter sink); the 'rest' backend serves its views to an "
+                             "out-of-process detector instead")
+         module_name, sep, class_name = self.camera_adapter.partition(":")
+         if not sep or not module_name.strip() or not class_name.strip():
+            raise ValueError(f"camera_adapter must have the form 'package.module:ClassName', got {self.camera_adapter!r}")
+      elif self.camera_adapter_params:
+         raise ValueError("camera_adapter_params requires camera_adapter")
       return self
