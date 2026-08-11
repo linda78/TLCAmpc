@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from drone_sim.domain.config import (PhysicsSpec, ControllerSpec, DroneConfig, ObstacleConfig, RoomConfig, ScenarioConfig)
+from drone_sim.domain.drone_model import DroneModel
 
 
 class TestPhysicsSpec:
@@ -458,28 +459,39 @@ class TestScenarioConfigCamera:
       assert cfg.camera_fov_deg == 90.0
       assert cfg.camera_range == 10.0
       assert cfg.camera_backend == "stub"
-      assert cfg.camera_url is None
+      assert cfg.camera_api_port == 5006
+      assert cfg.camera_expose_truth is False
       assert cfg.camera_noise_sigma == 0.0
       assert cfg.camera_rate_steps == 1
       assert cfg.camera_render_images is False
       assert cfg.camera_async is True
       assert cfg.camera_feeds_dmpc is False
 
-   def test_rest_backend_requires_url(self):
-      with pytest.raises(ValidationError, match="camera_url"):
+   def test_rest_backend_requires_render_images(self):
+      # We serve rendered images for pickup; without them the detector has nothing to fetch.
+      with pytest.raises(ValidationError, match="camera_render_images"):
          self._cfg(camera_enabled=True, camera_backend="rest")
 
-   def test_rest_backend_with_url_ok(self):
-      cfg = self._cfg(
-         camera_enabled=True,
-         camera_backend="rest",
-         camera_url="http://localhost:5006",
-      )
-      assert cfg.camera_url == "http://localhost:5006"
+   def test_rest_backend_with_render_images_ok(self):
+      cfg = self._cfg(camera_enabled=True, camera_backend="rest", camera_render_images=True)
+      assert cfg.camera_backend == "rest"
+      assert cfg.camera_render_images is True
 
-   def test_stub_backend_does_not_require_url(self):
+   def test_stub_backend_does_not_require_render_images(self):
       cfg = self._cfg(camera_enabled=True, camera_backend="stub")
-      assert cfg.camera_url is None
+      assert cfg.camera_render_images is False
+
+   def test_api_port_bounds(self):
+      with pytest.raises(ValidationError, match="camera_api_port"):
+         self._cfg(camera_api_port=0)
+      with pytest.raises(ValidationError, match="camera_api_port"):
+         self._cfg(camera_api_port=65536)
+      cfg = self._cfg(camera_api_port=8080)
+      assert cfg.camera_api_port == 8080
+
+   def test_expose_truth_opt_in(self):
+      cfg = self._cfg(camera_enabled=True, camera_expose_truth=True)
+      assert cfg.camera_expose_truth is True
 
    def test_invalid_backend_raises(self):
       with pytest.raises(ValidationError):
@@ -520,3 +532,119 @@ class TestScenarioConfigCamera:
          self._cfg(camera_render_images=True)
       cfg = self._cfg(camera_enabled=True, camera_render_images=True)
       assert cfg.camera_render_images is True
+
+
+class TestScenarioConfigDroneModel:
+   """Tests for drone_model / drone_model_path: scenario-wide default plus per-drone override, resolved and checked at load time."""
+
+   BUNDLED = "drone_costum_0_0_5.obj"
+   OTHER_BUNDLED = "drone_costum_0_1.obj"
+
+   def _cfg(self, drones, **kwargs):
+      return ScenarioConfig(
+         physics=PhysicsSpec(type="linear_kinematics"),
+         controller=ControllerSpec(type="mpc_agent"),
+         drones=drones,
+         **kwargs,
+      )
+
+   def _drone(self, drone_id="d1", **kwargs):
+      return DroneConfig(drone_id=drone_id, start=[0.0, 0.0, 0.0], target=[5.0, 5.0, 5.0], **kwargs)
+
+   def test_defaults_to_sphere_without_a_path(self):
+      """Test every existing config keeps drawing spheres — nothing to configure, no file to find."""
+      cfg = self._cfg([self._drone()])
+
+      assert cfg.drone_model == "sphere"
+      assert cfg.drone_model_path is None
+      assert cfg.drones[0].drone_model is None
+      assert cfg.drones[0].drone_model_path is None
+      assert cfg.drone_model_for(cfg.drones[0]) == DroneModel(kind="sphere")
+
+   def test_drone_without_override_inherits_the_scenario_default(self):
+      """Test the homogeneous case: set the model once on the scenario, every drone picks it up."""
+      cfg = self._cfg([self._drone("d1"), self._drone("d2")], drone_model="obj", drone_model_path=self.BUNDLED)
+
+      models = [cfg.drone_model_for(d) for d in cfg.drones]
+
+      assert [m.kind for m in models] == ["obj", "obj"]
+      assert models[0].path == models[1].path
+      assert models[0].path.name == self.BUNDLED
+
+   def test_drone_override_wins_over_the_default(self):
+      """Test the heterogeneous case: a drone naming its own mesh keeps it while the rest inherit."""
+      cfg = self._cfg(
+         [self._drone("inherits"), self._drone("overrides", drone_model_path=self.OTHER_BUNDLED)],
+         drone_model="obj",
+         drone_model_path=self.BUNDLED,
+      )
+
+      inherited, overridden = (cfg.drone_model_for(d) for d in cfg.drones)
+
+      assert inherited.path.name == self.BUNDLED
+      assert overridden.path.name == self.OTHER_BUNDLED
+
+   def test_kind_and_path_resolve_independently(self):
+      """Test a drone can opt out to a sphere inside an obj scenario without also having to unset the path."""
+      cfg = self._cfg(
+         [self._drone("mesh"), self._drone("ball", drone_model="sphere")],
+         drone_model="obj",
+         drone_model_path=self.BUNDLED,
+      )
+
+      mesh, ball = (cfg.drone_model_for(d) for d in cfg.drones)
+
+      assert mesh.kind == "obj"
+      assert ball.kind == "sphere"
+      assert ball.path is None
+
+   def test_drone_may_opt_in_to_obj_alone(self):
+      """Test a single obj drone in an otherwise spherical scenario needs both fields on itself."""
+      cfg = self._cfg([self._drone("ball"), self._drone("mesh", drone_model="obj", drone_model_path=self.BUNDLED)])
+
+      ball, mesh = (cfg.drone_model_for(d) for d in cfg.drones)
+
+      assert ball.kind == "sphere"
+      assert mesh.kind == "obj"
+      assert mesh.path.is_file()
+
+   def test_missing_file_raises_at_load_time(self):
+      """Test a bad path fails while parsing the config, not once per capture on the perception worker thread."""
+      with pytest.raises(ValidationError, match="not found"):
+         self._cfg([self._drone()], drone_model="obj", drone_model_path="does_not_exist.obj")
+
+   def test_obj_without_path_raises_at_load_time(self):
+      """Test selecting the mesh renderer without naming a mesh is rejected."""
+      with pytest.raises(ValidationError, match="drone_model_path"):
+         self._cfg([self._drone()], drone_model="obj")
+
+   def test_error_names_the_offending_drone(self):
+      """Test the message points at the drone to fix — with a heterogeneous fleet the scenario default may be perfectly fine."""
+      with pytest.raises(ValidationError, match="broken"):
+         self._cfg([self._drone("fine"), self._drone("broken", drone_model="obj", drone_model_path="nope.obj")])
+
+   def test_unusable_scenario_default_is_tolerated_when_every_drone_overrides_it(self):
+      """Test validation looks at the resolved per-drone result, not at the raw default in isolation."""
+      cfg = self._cfg(
+         [self._drone("ball", drone_model="sphere")],
+         drone_model="obj",
+         drone_model_path="does_not_exist.obj",
+      )
+
+      assert cfg.drone_model_for(cfg.drones[0]).kind == "sphere"
+
+   def test_invalid_kind_raises(self):
+      """Test the kind is a closed set on both levels."""
+      with pytest.raises(ValidationError):
+         self._cfg([self._drone()], drone_model="cylinder")  # type: ignore[arg-type]
+      with pytest.raises(ValidationError):
+         self._drone(drone_model="cylinder")  # type: ignore[arg-type]
+
+   def test_absolute_path_is_accepted(self, tmp_path):
+      """Test users can point at a model outside the package."""
+      own = tmp_path / "my_drone.obj"
+      own.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+
+      cfg = self._cfg([self._drone()], drone_model="obj", drone_model_path=str(own))
+
+      assert cfg.drone_model_for(cfg.drones[0]).path == own

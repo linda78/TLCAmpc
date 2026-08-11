@@ -456,6 +456,59 @@ class TestSimulatorAdaptiveConfigPipeline:
       assert adaptive_drone.compute_adaptive_radius(np.zeros(3)) == adaptive_drone.safety_zone
 
 
+class TestSimulatorDroneModelPipeline:
+   """Tests for drone_model flowing from the config into Drone.model, where the FPV camera looks it up per neighbor."""
+
+   BUNDLED = "drone_costum_0_0_5.obj"
+   OTHER_BUNDLED = "drone_costum_0_1.obj"
+
+   def _cfg(self, drones, **kwargs):
+      return ScenarioConfig(
+         dt=0.1,
+         physics=PhysicsSpec(type="linear_kinematics"),
+         controller=ControllerSpec(type="mpc_agent"),
+         drones=drones,
+         room=RoomConfig(min=[-10, -10, 0], max=[10, 10, 10]),
+         **kwargs,
+      )
+
+   def test_drones_default_to_spheres(self):
+      """Test a config that says nothing about models produces sphere drones, as every existing scenario does."""
+      sim = Simulator.from_config(self._cfg([DroneConfig(drone_id="d1", start=[0, 0, 5], target=[5, 5, 5])]))
+
+      assert sim.drones[0].model.kind == "sphere"
+      assert sim.drones[0].model.path is None
+
+   def test_scenario_default_reaches_every_drone(self):
+      """Test the homogeneous case survives the trip through from_config."""
+      cfg = self._cfg(
+         [DroneConfig(drone_id="d1", start=[0, 0, 5], target=[5, 5, 5]), DroneConfig(drone_id="d2", start=[5, 0, 5], target=[0, 5, 5])],
+         drone_model="obj",
+         drone_model_path=self.BUNDLED,
+      )
+
+      sim = Simulator.from_config(cfg)
+
+      assert [d.model.kind for d in sim.drones] == ["obj", "obj"]
+      assert sim.drones[0].model.path.is_file()
+
+   def test_heterogeneous_fleet_keeps_per_drone_models(self):
+      """Test three drones, three appearances — the reason the field is per-drone at all."""
+      cfg = self._cfg(
+         [
+            DroneConfig(drone_id="ball", start=[0, 0, 5], target=[5, 5, 5]),
+            DroneConfig(drone_id="mesh_a", start=[5, 0, 5], target=[0, 5, 5], drone_model="obj", drone_model_path=self.BUNDLED),
+            DroneConfig(drone_id="mesh_b", start=[0, 5, 5], target=[5, 0, 5], drone_model="obj", drone_model_path=self.OTHER_BUNDLED),
+         ]
+      )
+
+      ball, mesh_a, mesh_b = Simulator.from_config(cfg).drones
+
+      assert ball.model.kind == "sphere"
+      assert mesh_a.model.path.name == self.BUNDLED
+      assert mesh_b.model.path.name == self.OTHER_BUNDLED
+
+
 class TestSimulatorEdgeCases:
    """Edge case tests for Simulator."""
 

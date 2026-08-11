@@ -4,6 +4,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+from drone_sim.domain.drone_model import DroneModel, DroneModelKind, resolve_drone_model
+
 ColorValue = str | list[float]
 
 
@@ -58,6 +60,11 @@ class DroneConfig(BaseModel):
    # If omitted, the renderer uses the drone_color.
    trace_color: ColorValue | None = None
 
+   # How this drone is drawn by the FPV camera; None on either field falls back to the ScenarioConfig default of the same name. The two resolve
+   # independently, so a drone in a heterogeneous fleet can swap just the mesh file while inheriting the scenario's kind.
+   drone_model: DroneModelKind | None = None
+   drone_model_path: str | None = None
+
    @model_validator(mode="after")
    def _validate_alpha(self) -> DroneConfig:
       if self.alpha is not None and self.alpha <= 0:
@@ -98,6 +105,11 @@ class ScenarioConfig(BaseModel):
 
    # Optional visualization bounds.
    room: RoomConfig | None = None
+
+   # Default appearance for drones that do not set DroneConfig.drone_model / drone_model_path. "sphere" needs no path; "obj" draws the mesh at
+   # drone_model_path, given either as a file name under resources/assets/ or as an absolute path.
+   drone_model: DroneModelKind = "sphere"
+   drone_model_path: str | None = None
 
    # Path to a trained LSTM model checkpoint (.pt file). Required when any
    # drone has safety_zone_mode="lstm". Defaults to None for backward compat.
@@ -166,13 +178,23 @@ class ScenarioConfig(BaseModel):
    camera_range: float = 10.0
 
    # Which capture backend to use. "stub" synthesizes detections in-process
-   # from true sim state (default — no network IO). "rest" POSTs each capture
-   # to an external predictor service at ``camera_url``.
+   # from true sim state (default — no network IO). "rest" parks each rendered
+   # capture for pickup and exposes the perception endpoints: the externally
+   # developed detector pulls the images and pushes its estimates back. We are
+   # the server in that exchange — nothing here calls out to a foreign service.
    camera_backend: Literal["stub", "rest"] = "stub"
 
-   # Endpoint base URL for the REST backend, e.g. "http://localhost:5006".
-   # Required when ``camera_backend == "rest"``.
-   camera_url: str | None = None
+   # TCP port the perception endpoints are served on when the simulation is
+   # driven by the GUI (which spins up its own uvicorn thread). Ignored when
+   # the simulation runs inside ``drone_sim.api.app``, which already owns a
+   # port. Must be in [1, 65535].
+   camera_api_port: int = 5006
+
+   # When True, the image pull additionally returns the ground truth of the
+   # visibility test (which neighbor is where). Default False: extracting
+   # positions from pixels is the detector's job, and handing over the answer
+   # would bypass it. Meant for calibration and debugging only.
+   camera_expose_truth: bool = False
 
    # Standard deviation of Gaussian position noise added to observed
    # neighbor positions (meters). 0.0 (default) = perfect observations.
@@ -195,6 +217,25 @@ class ScenarioConfig(BaseModel):
    # mailbox fed from broadcasts as before. Requires ``camera_enabled``.
    camera_feeds_dmpc: bool = False
 
+   def drone_model_for(self, drone: DroneConfig) -> DroneModel:
+      """Resolve the model of a single drone against the scenario defaults, mirroring how ``controller`` and ``physics`` fall back.
+
+      :raises ValueError: when the resulting kind/path pair is unusable — see :func:`~drone_sim.domain.drone_model.resolve_drone_model`.
+      """
+      kind = drone.drone_model if drone.drone_model is not None else self.drone_model
+      path = drone.drone_model_path if drone.drone_model_path is not None else self.drone_model_path
+      return resolve_drone_model(kind, path)
+
+   @model_validator(mode="after")
+   def _validate_drone_models(self) -> ScenarioConfig:
+      # Resolve every drone now so a missing .obj fails at config load, not once per capture on the perception worker thread.
+      for drone in self.drones:
+         try:
+            self.drone_model_for(drone)
+         except ValueError as exc:
+            raise ValueError(f"drone_model of drone '{drone.drone_id}': {exc}") from exc
+      return self
+
    @model_validator(mode="after")
    def _validate_bof(self) -> ScenarioConfig:
       if self.bof_backend == "rest" and not self.bof_url:
@@ -209,8 +250,11 @@ class ScenarioConfig(BaseModel):
 
    @model_validator(mode="after")
    def _validate_camera(self) -> ScenarioConfig:
-      if self.camera_backend == "rest" and not self.camera_url:
-         raise ValueError("camera_url must be set when camera_backend='rest'")
+      # The REST backend serves rendered images for pickup, so without rendering there is nothing for the detector to fetch.
+      if self.camera_backend == "rest" and not self.camera_render_images:
+         raise ValueError("camera_render_images must be True when camera_backend='rest'")
+      if not 1 <= self.camera_api_port <= 65535:
+         raise ValueError("camera_api_port must be in [1, 65535]")
       if not 0 < self.camera_fov_deg <= 360:
          raise ValueError("camera_fov_deg must be in (0, 360]")
       if self.camera_range <= 0:

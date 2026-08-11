@@ -1,54 +1,22 @@
 from __future__ import annotations
 
 from pathlib import Path
-from functools import lru_cache
 
 import numpy as np
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
+from drone_sim.api.utils.obj_loader import BLENDER_TO_SIM_ROTATION_DEG, load_obj, normalize_mesh, rotation_matrix
 from drone_sim.domain.drone import Drone
 
+# Re-exported so existing importers of these names keep working; the implementations live in the matplotlib-free obj_loader, which the FPV camera
+# shares (see its module docstring).
+_load_obj = load_obj
+_rotation_matrix = rotation_matrix
+
 
 # ------------------------------------------------------------------ #
-# OBJ mesh loader + renderer                                          #
+# OBJ mesh renderer                                                   #
 # ------------------------------------------------------------------ #
-
-@lru_cache(maxsize=8)
-def _load_obj(path: str) -> tuple[np.ndarray, list[tuple[int, ...]]]:
-    """Load vertices and face indices from a Wavefront .obj file.
-
-    Returns
-    -------
-    vertices : ndarray, shape (V, 3)
-    faces    : list of tuples of 0-based vertex indices (triangles or quads)
-    """
-    verts: list[list[float]] = []
-    faces: list[tuple[int, ...]] = []
-    with open(path, "r") as fh:
-        for line in fh:
-            parts = line.strip().split()
-            if not parts:
-                continue
-            if parts[0] == "v":
-                verts.append([float(parts[1]), float(parts[2]), float(parts[3])])
-            elif parts[0] == "f":
-                # face indices can be v, v/vt, v/vt/vn, or v//vn
-                idx = tuple(int(p.split("/")[0]) - 1 for p in parts[1:])
-                faces.append(idx)
-    return np.array(verts, dtype=float), faces
-
-
-def _rotation_matrix(rx: float, ry: float, rz: float) -> np.ndarray:
-    """Build a 3x3 rotation matrix from Euler angles (degrees), applied X -> Y -> Z."""
-    rx, ry, rz = np.radians(rx), np.radians(ry), np.radians(rz)
-    cx, sx = np.cos(rx), np.sin(rx)
-    cy, sy = np.cos(ry), np.sin(ry)
-    cz, sz = np.cos(rz), np.sin(rz)
-    Rx = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]])
-    Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
-    Rz = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]])
-    return Rz @ Ry @ Rx
-
 
 def draw_obj_mesh(
     ax: object,
@@ -60,7 +28,7 @@ def draw_obj_mesh(
     alpha: float = 0.8,
     edgecolor: str = "k",
     linewidth: float = 0.3,
-    rotation_deg: tuple[float, float, float] = (-90.0, 0.0, 0.0),
+    rotation_deg: tuple[float, float, float] = BLENDER_TO_SIM_ROTATION_DEG,
 ) -> None:
     """Draw a 3D OBJ mesh on *ax* centred at *center*.
 
@@ -71,22 +39,14 @@ def draw_obj_mesh(
     The default rotation ``(-90, 0, 0)`` converts Blender's Y-up convention
     to the simulation's Z-up convention.
     """
-    verts, faces = _load_obj(str(obj_path))
-    if len(verts) == 0 or len(faces) == 0:
+    verts, faces = load_obj(str(obj_path))
+    if len(faces) == 0:
         return
 
-    # Normalise: centre at origin, fit inside [-0.5, 0.5] * scale
-    bbox_min = verts.min(axis=0)
-    bbox_max = verts.max(axis=0)
-    bbox_range = bbox_max - bbox_min
-    max_extent = bbox_range.max()
-    if max_extent < 1e-12:
+    # Centre at origin, fit the longest axis to *scale*, rotate — shared with the FPV camera so both show the same object.
+    normed = normalize_mesh(verts, scale=scale, rotation_deg=rotation_deg)
+    if normed is None:
         return
-    normed = (verts - (bbox_min + bbox_max) / 2) / max_extent * scale
-
-    # Apply rotation (around the model's own centre, i.e. the origin)
-    R = _rotation_matrix(*rotation_deg)
-    normed = (R @ normed.T).T
 
     # Translate to desired centre
     center = np.asarray(center, dtype=float).reshape(3)

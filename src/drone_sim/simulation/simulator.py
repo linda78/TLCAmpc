@@ -109,10 +109,13 @@ class Simulator:
          safety_color = _normalize_color(drone_cfg.safety_color or drone_cfg.drone_color)
          trace_color = _normalize_color(drone_cfg.trace_color or drone_cfg.drone_color)
 
+         # Same fallback shape as the colors above, one level deeper: per-drone override, else the scenario default. Validated at config load.
+         model = cfg.drone_model_for(drone_cfg)
+
          drones.append(
             Drone(drone_id=drone_cfg.drone_id, radius=drone_cfg.radius, safety_zone=drone_cfg.safety_zone, cons_stop=drone_cfg.cons_stop, color=drone_color,
                   safety_color=safety_color, trace_color=trace_color, controller=controller, physics=drone_physics, x=x0, route=route, alpha=drone_cfg.alpha,
-                  safety_zone_mode=drone_cfg.safety_zone_mode))
+                  safety_zone_mode=drone_cfg.safety_zone_mode, model=model))
 
       obstacles = [(np.asarray(o.center, dtype=float), np.asarray(o.half_extents, dtype=float)) for o in cfg.obstacles]
 

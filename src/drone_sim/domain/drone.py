@@ -6,6 +6,7 @@ from typing import TypeAlias
 import numpy as np
 
 from drone_sim.controllers.base import Controller
+from drone_sim.domain.drone_model import DroneModel
 from drone_sim.physics.base import PhysicsModel
 
 Color: TypeAlias = str | tuple[float, float, float]
@@ -65,6 +66,10 @@ class Drone:
    # TODO: adaptive is not enough, we have velocity dependent safety zones and uncertainty safety zones ... switch that behavior,
    #  so all adaptive safety_zone are "adaptive" and then be able to check if drone is velocity dependent or uncertainty dependent. Maybe return a type, instead of a bool.
    safety_zone_mode: str = "fixed"
+
+   # How this drone is drawn — sphere or .obj mesh, already resolved and checked at config load. Sits here next to radius and the colors because
+   # it is the same kind of per-drone appearance property, and because the FPV camera has to look it up per neighbor.
+   model: DroneModel = field(default_factory=DroneModel)
 
    @property
    def is_adaptive(self) -> bool:

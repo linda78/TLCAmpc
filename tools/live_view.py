@@ -17,6 +17,7 @@ from PIL import Image
 
 from drone_sim.api.render import render_png
 from drone_sim.domain.config import ScenarioConfig
+from drone_sim.domain.drone_model import resolve_drone_model
 from drone_sim.simulation.simulator import Simulator
 from drone_sim.simulation.distributed.distributed_coordinator import DistributedMPCCoordinator
 from tools.utility import DronePlacementError
@@ -69,6 +70,31 @@ def _create_scenario(config_path: str | Path | None, params: dict[str, str] | No
       print(f"{param}: {params[param]}")
 
    return scenario
+
+def apply_obj_name(scenario: ScenarioConfig, obj_name: str | None) -> ScenarioConfig:
+   """Point the scenario's default drone model at ``obj_name``, leaving per-drone overrides alone.
+
+   The flag sets the *scenario* default, not the drones. For today's configs — none of which set a per-drone model — that behaves exactly as
+   before: every drone gets the model named on the command line. In a heterogeneous scenario the deliberately configured variety survives instead
+   of being flattened by the CLI.
+
+   The name is resolved through the same function the config validator uses, so a typo fails here with a readable message rather than somewhere
+   inside the first render.
+
+   :param scenario: Parsed scenario; returned unchanged when no name is given.
+   :param obj_name: File name under ``resources/assets/``, or an absolute path.
+   :return: The scenario to run.
+   """
+   if not obj_name:
+      return scenario
+
+   try:
+      resolve_drone_model("obj", obj_name)
+   except ValueError as exc:
+      _die(f"--obj-name: {exc}")
+
+   return scenario.model_copy(update={"drone_model": "obj", "drone_model_path": obj_name})
+
 
 def live_view_simulator(sim: Simulator, *, steps: int, step_n: int, sleep_s: float, trace_len: int,
                         width: int, height: int, dpi: int, elev: float, azim: float,
@@ -180,6 +206,7 @@ def run_live_view(*, config_path: str | Path | None, params: dict[str, str] | No
                   width: int, height: int, dpi: int, elev: float, azim: float, record_dir: str | Path | None, gif_path: str | Path | None, gif_fps: float,
                   obj_name: str | None=None) -> None:
    scenario = _create_scenario(config_path=config_path, params=params)
+   scenario = apply_obj_name(scenario, obj_name)
    sim = Simulator.from_config(scenario)
    live_view_simulator(sim, steps=steps, step_n=step_n, sleep_s=sleep_s, trace_len=trace_len,
                        width=width, height=height, dpi=dpi, elev=elev, azim=azim,
