@@ -65,6 +65,34 @@ class ThreadSafeMailbox:
             with condition:
                 condition.notify_all()
 
+    def deliver(self, receiver_id: str, message: TrajectoryMessage) -> None:
+        """Deliver one message directly into a single drone's inbox, bypassing the NeighborGraph (non-blocking).
+
+        Used by the perception bridge (:mod:`drone_sim.perception.bridge`), where the
+        routing decision has already been made by the camera: a neighbor is in an
+        observer's estimates precisely because that observer saw it, so re-running the
+        geometric comm-radius test on ground truth would only second-guess the sensor.
+        Otherwise this behaves exactly like a one-recipient broadcast -- the message is
+        filed under ``message.drone_id``, a newer message from the same sender overwrites
+        the previous one, and a thread parked in wait_for_update for this receiver is
+        woken.
+
+        :param receiver_id: ID of the receiving drone
+        :param message: TrajectoryMessage to file under its own ``drone_id``
+        """
+        with self._lock:
+            if receiver_id not in self._inboxes:
+                self._inboxes[receiver_id] = {}
+            self._inboxes[receiver_id][message.drone_id] = message
+
+            # Collect the condition under the lock, notify outside it (same lock hierarchy as broadcast)
+            condition = self._conditions.get(receiver_id)
+
+        # Notify OUTSIDE the main lock to avoid deadlock
+        if condition is not None:
+            with condition:
+                condition.notify_all()
+
     def receive_latest(self, receiver_id: str) -> dict[str, TrajectoryMessage]:
         """Receive latest messages for a drone (non-blocking).
 
