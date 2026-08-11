@@ -1,0 +1,71 @@
+{
+  "dt": 0.1,
+  "room": {"min": [-2.5, -2.5, -2.5], "max": [2.5, 2.5, 2.5]},
+  "physics": [
+    {
+      "id": "default",
+      "type": "linear_kinematics",
+      "params": {
+        "v_max": 3.0,
+        "u_min": [-3.0, -3.0, -3.0],
+        "u_max": [3.0, 3.0, 3.0]
+      }
+    }
+  ],
+
+  "comm_radius": null,
+
+  "controller": {
+    "type": "mpc_agent_adaptive",
+    "params": {
+      "horizon": 4,
+      "q_pos": [2.0, 2.0, 2.0],
+      "q_vel": [1.0, 1.0, 1.0],
+      "r_u": [0.5, 0.5, 0.5]
+    }
+  },
+
+  "coordinator": {
+    "type": "dmpc_threaded",
+    "params": {
+      "horizon": 4
+    }
+  },
+
+  "camera_enabled": true,
+  "camera_backend": "stub",
+  "camera_fov_deg": 120.0,
+  "camera_range": 5.0,
+  "camera_noise_sigma": 0.02,
+  "camera_async": true,
+  "camera_feeds_dmpc": true,
+
+  "drones": [
+    {
+      "drone_id": "drone-1",
+      "start": [-0.1, -1.5, 0.2],
+      "target": [0.1, 1.5, -0.2],
+      "radius": 0.4,
+      "safety_zone": 1.0,
+      "cons_stop": 0.0,
+      "drone_color": "#00FFFF",
+      "physics": "default",
+      "alpha": 0.3,
+      "drone_model": "obj",
+      "drone_model_path": "drone_costum_0_0_5.obj"
+    },
+    {
+      "drone_id": "drone-2",
+      "start": [0.1, 1.5, -0.2],
+      "target": [-0.1, -1.5, 0.2],
+      "radius": 0.4,
+      "safety_zone": 1.0,
+      "cons_stop": 0.0,
+      "drone_color": "#800080",
+      "physics": "default",
+      "alpha": 0.3,
+      "drone_model": "obj",
+      "drone_model_path": "drone_costum_0_0_5.obj"
+    }
+  ]
+}
