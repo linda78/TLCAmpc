@@ -125,9 +125,7 @@ class PerceptionMailbox:
       :return: Mapping ``observed_id -> PositionEstimate``; empty dict for an unknown observer.
       """
       with self._lock:
-         if observer_id not in self._latest:
-            return {}
-         return self._latest[observer_id].copy()
+         return dict(self._latest.get(observer_id, {}))
 
    def history(self, observer_id: str, observed_id: str) -> list[PositionEstimate]:
       """Recent estimates for one ``(observer, observed)`` pair, **oldest first, newest last**.
@@ -140,10 +138,7 @@ class PerceptionMailbox:
       :return: New list of estimates, oldest first; empty list for an unknown pair.
       """
       with self._lock:
-         entries = self._history.get((observer_id, observed_id))
-         if entries is None:
-            return []
-         return list(entries)
+         return list(self._history.get((observer_id, observed_id), ()))
 
    def clear(self) -> None:
       """Drop everything — both the latest estimates and the full history.

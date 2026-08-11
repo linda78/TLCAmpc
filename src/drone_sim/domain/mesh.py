@@ -1,11 +1,14 @@
-"""Wavefront OBJ parsing and mesh normalisation — deliberately free of matplotlib.
+"""Renderer-agnostic mesh geometry: Wavefront OBJ parsing, mesh normalisation and the sphere grid — deliberately free of matplotlib and PIL.
 
 Two renderers need this geometry: the matplotlib overview in :mod:`drone_sim.api.utils.render_helper` (GUI, ``/render``, ``tools/live_view.py``) and
 the pinhole FPV camera in :mod:`drone_sim.perception.fpv_render`, which rasterises with PIL. They must agree on *what* the object is — same vertices,
-same centring, same Blender-Y-up-to-sim-Z-up rotation — or the camera would show a different drone than the overview.
+same centring, same Blender-Y-up-to-sim-Z-up rotation, same sphere parametrisation — or the camera would show a different drone than the overview.
 
 That shared source cannot live in ``render_helper``: it imports ``mpl_toolkits`` at module level, and pulling matplotlib into
-``drone_sim.perception`` is exactly the regression the perception package guards against in its lazy-import test. Hence this module — numpy only.
+``drone_sim.perception`` is exactly the regression the perception package guards against in its lazy-import test. It lives in ``domain`` rather than
+under ``api`` because the perception worker must not depend on the web-API package — ``api/__init__.py`` is empty today, but the day someone adds
+``from .app import app`` to it, every FPV frame would drag FastAPI and matplotlib onto the render thread. ``domain`` is a dependency both renderers
+already have, and this module sits next to :mod:`drone_sim.domain.drone_model`, which owns *which* mesh file a drone uses.
 
 Note that the two renderers deliberately differ in *size*: the FPV scales a drone to ``2 * radius`` because apparent size is its main depth cue,
 while the overview treats model scale as cosmetics. That divergence is a documented decision, not drift.
@@ -21,6 +24,23 @@ BLENDER_TO_SIM_ROTATION_DEG = (-90.0, 0.0, 0.0)
 
 # A bounding box shorter than this in every axis carries no usable scale — normalising it would divide by ~0.
 _MIN_EXTENT = 1e-12
+
+# Latitude/longitude samples per axis of the sphere grid. Shared so the overview wireframe and the FPV camera draw the same sphere.
+SPHERE_RESOLUTION = 24
+
+
+def sphere_grid(resolution: int = SPHERE_RESOLUTION) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+   """Unit sphere sampled on a latitude/longitude grid, as three ``(resolution, resolution)`` coordinate arrays.
+
+   Returned in meshgrid form rather than as vertices because that is what ``plot_wireframe`` wants; the FPV camera ravels them into a vertex list.
+   Both renderers going through this function is what keeps the sphere in the camera image the same object as the sphere in the overview.
+
+   :param resolution: Samples along each axis; the longitude ring closes because the first and last sample coincide.
+   :return: ``(x, y, z)``, each ``(resolution, resolution)``, every point at distance 1 from the origin.
+   """
+   u = np.linspace(0.0, 2.0 * np.pi, resolution)
+   v = np.linspace(0.0, np.pi, resolution)
+   return (np.outer(np.cos(u), np.sin(v)), np.outer(np.sin(u), np.sin(v)), np.outer(np.ones_like(u), np.cos(v)))
 
 
 @lru_cache(maxsize=8)

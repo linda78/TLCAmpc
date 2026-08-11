@@ -5,13 +5,8 @@ from pathlib import Path
 import numpy as np
 from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 
-from drone_sim.api.utils.obj_loader import BLENDER_TO_SIM_ROTATION_DEG, load_obj, normalize_mesh, rotation_matrix
 from drone_sim.domain.drone import Drone
-
-# Re-exported so existing importers of these names keep working; the implementations live in the matplotlib-free obj_loader, which the FPV camera
-# shares (see its module docstring).
-_load_obj = load_obj
-_rotation_matrix = rotation_matrix
+from drone_sim.domain.mesh import BLENDER_TO_SIM_ROTATION_DEG, SPHERE_RESOLUTION, load_obj, normalize_mesh, sphere_grid
 
 
 # ------------------------------------------------------------------ #
@@ -82,14 +77,14 @@ def draw_room_wireframe(ax: object, room_min: np.ndarray, room_max: np.ndarray) 
       ax.plot([xa, xb], [ya, yb], [za, zb], color="black", linewidth=1.0, alpha=0.4)
 
 
-def draw_sphere_wireframe(ax: object, center: np.ndarray, radius: float, *, color: str, alpha: float, lw: float, resolution: int = 24) -> None:
+def draw_sphere_wireframe(ax: object, center: np.ndarray, radius: float, *, color: str, alpha: float, lw: float,
+                          resolution: int = SPHERE_RESOLUTION) -> None:
    """Draw a simple sphere wireframe."""
 
-   u = np.linspace(0.0, 2.0 * np.pi, resolution)
-   v = np.linspace(0.0, np.pi, resolution)
-   x = center[0] + radius * np.outer(np.cos(u), np.sin(v))
-   y = center[1] + radius * np.outer(np.sin(u), np.sin(v))
-   z = center[2] + radius * np.outer(np.ones_like(u), np.cos(v))
+   gx, gy, gz = sphere_grid(resolution)
+   x = center[0] + radius * gx
+   y = center[1] + radius * gy
+   z = center[2] + radius * gz
 
    ax.plot_wireframe(x, y, z, color=color, linewidth=lw, alpha=alpha, rstride=2, cstride=2)
 

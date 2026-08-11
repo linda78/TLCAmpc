@@ -1,4 +1,4 @@
-"""Tests for drone_sim.api.utils.obj_loader — the geometry the overview renderer and the FPV camera share.
+"""Tests for drone_sim.domain.mesh — the geometry the overview renderer and the FPV camera share.
 
 Two things matter here beyond "does it parse": the module must stay matplotlib-free (otherwise importing it from the perception package drags
 matplotlib into the simulation core), and ``normalize_mesh`` must keep producing exactly what ``draw_obj_mesh`` produced before the extraction —
@@ -15,9 +15,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from drone_sim.api.utils.obj_loader import BLENDER_TO_SIM_ROTATION_DEG, load_obj, normalize_mesh, rotation_matrix
-
-ASSETS_DIR = Path(__file__).resolve().parents[3] / "src" / "drone_sim" / "resources" / "assets"
+from drone_sim.domain.drone_model import ASSETS_DIR
+from drone_sim.domain.mesh import (BLENDER_TO_SIM_ROTATION_DEG, SPHERE_RESOLUTION, load_obj, normalize_mesh, rotation_matrix, sphere_grid)
 
 
 def _write_obj(tmp_path: Path, body: str, name: str = "mesh.obj") -> str:
@@ -192,17 +191,47 @@ class TestNormalizeMesh:
       np.testing.assert_allclose(normalize_mesh(verts, scale=scale), inlined)
 
 
+class TestSphereGrid:
+   """Tests for sphere_grid — shared so the overview wireframe and the FPV camera draw the same sphere."""
+
+   def test_every_sample_lies_on_the_unit_sphere(self):
+      """Test the grid is unit-radius, so callers scale it by the drone radius and get exactly that size."""
+      x, y, z = sphere_grid()
+
+      np.testing.assert_allclose(np.sqrt(x ** 2 + y ** 2 + z ** 2), 1.0, atol=1e-12)
+
+   def test_shape_follows_the_resolution(self):
+      """Test both axes are sampled at the requested resolution."""
+      assert all(component.shape == (8, 8) for component in sphere_grid(8))
+      assert all(component.shape == (SPHERE_RESOLUTION, SPHERE_RESOLUTION) for component in sphere_grid())
+
+   def test_longitude_ring_closes(self):
+      """Test the first and last longitude samples coincide, which is what makes the seam invisible in both renderers."""
+      x, y, z = sphere_grid()
+
+      np.testing.assert_allclose(x[0], x[-1], atol=1e-12)
+      np.testing.assert_allclose(y[0], y[-1], atol=1e-12)
+      np.testing.assert_allclose(z[0], z[-1], atol=1e-12)
+
+   def test_poles_are_the_first_and_last_latitude(self):
+      """Test the parametrisation runs pole to pole, matching what draw_sphere_wireframe has always produced."""
+      _, _, z = sphere_grid()
+
+      np.testing.assert_allclose(z[:, 0], 1.0, atol=1e-12)
+      np.testing.assert_allclose(z[:, -1], -1.0, atol=1e-12)
+
+
 class TestNoMatplotlibDependency:
    """The reason this module exists at all: the perception package must be able to import it."""
 
-   def test_importing_obj_loader_does_not_pull_matplotlib(self):
+   def test_importing_mesh_does_not_pull_matplotlib(self):
       """Test the module stays numpy-only.
 
       Runs in a subprocess because matplotlib is long since imported by the time this test executes. If this fails, the FPV renderer can no longer
       share geometry with the overview without reintroducing the matplotlib import into ``drone_sim.perception``.
       """
       src = Path(__file__).resolve().parents[3] / "src"
-      probe = "import sys, drone_sim.api.utils.obj_loader; print('matplotlib' in sys.modules)"
+      probe = "import sys, drone_sim.domain.mesh; print('matplotlib' in sys.modules)"
 
       result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True,
                               env={**os.environ, "PYTHONPATH": str(src)})

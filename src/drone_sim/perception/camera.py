@@ -137,12 +137,10 @@ class CameraModel:
       if cached is not None:
          return cached.copy()
 
-      route = getattr(drone, "route", None)
-      if route is not None:
-         to_ref = np.asarray(route.current_ref(), dtype=float) - np.asarray(drone.position(), dtype=float)
-         dist = float(np.linalg.norm(to_ref))
-         if dist >= _HEADING_EPS:
-            return to_ref / dist
+      to_ref = np.asarray(drone.route.current_ref(), dtype=float) - np.asarray(drone.position(), dtype=float)
+      dist = float(np.linalg.norm(to_ref))
+      if dist >= _HEADING_EPS:
+         return to_ref / dist
 
       return _FALLBACK_VIEW_DIR.copy()
 

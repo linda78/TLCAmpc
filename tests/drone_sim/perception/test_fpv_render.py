@@ -24,9 +24,10 @@ import numpy as np
 import pytest
 
 from drone_sim.domain.drone_model import DroneModel, resolve_drone_model
+from drone_sim.domain.mesh import SPHERE_RESOLUTION, sphere_grid
 from drone_sim.perception.camera import CameraView, VisibleDrone
-from drone_sim.perception.fpv_render import (_MAX_FOV_DEG, _box_mesh, _camera_basis, _face_groups, _focal_length_px, _neighbor_mesh, _project,
-                                             _shade, _unit_obj_mesh, _unit_sphere_mesh, _warn_unknown_model, _warn_wide_fov, render_fpv_png)
+from drone_sim.perception.fpv_render import (_MAX_FOV_DEG, _Camera, _box_mesh, _camera_basis, _face_groups, _focal_length_px, _neighbor_mesh,
+                                             _obj_mesh, _project, _shade, _sphere_mesh, _warn_unknown_model, _warn_wide_fov, render_fpv_png)
 
 SIZE = (320, 240)
 EYE = np.array([5.0, 5.0, 2.0])
@@ -168,12 +169,16 @@ class TestFocalLength:
 class TestProjection:
    """Tests for the world -> pixel mapping, computed by hand."""
 
-   BASIS = _camera_basis(np.array([1.0, 0.0, 0.0]))
-   F_PX = _focal_length_px(90.0, 320)
-   CX, CY = 160.0, 120.0
+   CAM = _Camera(eye=EYE, basis=_camera_basis(np.array([1.0, 0.0, 0.0])), f_px=_focal_length_px(90.0, 320), width=320, height=240)
+   F_PX = CAM.f_px
+   CX, CY = CAM.cx, CAM.cy
 
    def _project(self, *points):
-      return _project(np.array(points, dtype=float), EYE, self.BASIS, self.F_PX, self.CX, self.CY)
+      return _project(np.array(points, dtype=float), self.CAM)
+
+   def test_principal_point_is_the_frame_centre(self):
+      """Test the camera derives cx/cy from the frame rather than storing them — nothing here models a shifted optical axis."""
+      assert (self.CAM.cx, self.CAM.cy) == (160.0, 120.0)
 
    def test_point_straight_ahead_lands_in_the_centre(self):
       """Test the optical axis maps to the principal point, whatever the distance."""
@@ -232,46 +237,63 @@ class TestMeshes:
 
    def test_sphere_mesh_is_a_unit_sphere(self):
       """Test every vertex sits on the unit sphere, so scaling by the radius gives the right size."""
-      verts, faces = _unit_sphere_mesh()
+      mesh = _sphere_mesh()
 
-      np.testing.assert_allclose(np.linalg.norm(verts, axis=1), 1.0, atol=1e-12)
-      assert len(faces) > 0
-      assert all(max(face) < len(verts) for face in faces)
+      np.testing.assert_allclose(np.linalg.norm(mesh.verts, axis=1), 1.0, atol=1e-12)
+      assert len(mesh.faces) > 0
+      assert all(max(face) < len(mesh.verts) for face in mesh.faces)
+
+   def test_sphere_mesh_uses_the_same_parametrisation_as_the_overview(self):
+      """Test the camera's sphere and ``draw_sphere_wireframe``'s sphere are the same object, not two lookalikes.
+
+      Both go through ``domain.mesh.sphere_grid``; before that shared helper existed the two copies could drift apart silently.
+      """
+      x, y, z = sphere_grid(SPHERE_RESOLUTION)
+
+      np.testing.assert_array_equal(_sphere_mesh().verts, np.stack([x.ravel(), y.ravel(), z.ravel()], axis=1))
 
    def test_sphere_mesh_is_cached(self):
       """Test the grid is built once, not per drone per frame."""
-      assert _unit_sphere_mesh()[0] is _unit_sphere_mesh()[0]
+      assert _sphere_mesh() is _sphere_mesh()
 
    def test_obj_mesh_is_normalised_to_a_unit_longest_axis(self):
       """Test the cached mesh is size-neutral; the per-drone scale is applied afterwards."""
-      verts, faces = _unit_obj_mesh(str(OBJ_MODEL.path))
+      mesh = _obj_mesh(str(OBJ_MODEL.path))
 
-      extents = verts.max(axis=0) - verts.min(axis=0)
+      extents = mesh.verts.max(axis=0) - mesh.verts.min(axis=0)
       assert float(extents.max()) == pytest.approx(1.0)
-      assert len(faces) > 0
+      assert len(mesh.faces) > 0
 
    def test_obj_mesh_is_cached_per_path(self):
       """Test a heterogeneous fleet holds one mesh per model, not the first model twice (nor one parse per frame)."""
-      first = _unit_obj_mesh(str(OBJ_MODEL.path))
-      again = _unit_obj_mesh(str(OBJ_MODEL.path))
-      other = _unit_obj_mesh(str(OTHER_OBJ_MODEL.path))
+      first = _obj_mesh(str(OBJ_MODEL.path))
+      again = _obj_mesh(str(OBJ_MODEL.path))
+      other = _obj_mesh(str(OTHER_OBJ_MODEL.path))
 
-      assert first[0] is again[0]
-      assert other[0] is not first[0]
-      assert not np.allclose(other[0][: len(first[0])].shape, 0)
+      assert first is again
+      assert other is not first
+      assert not np.array_equal(other.verts, first.verts)
+
+   def test_obj_mesh_cache_is_unbounded(self):
+      """Test the cache cannot evict.
+
+      A bounded cache would be worse than none for the case this is built for: a fleet with more distinct models than slots would evict and
+      re-parse the .obj for every neighbor of every frame — 2.5 ms for the small asset, 17 ms for the full-resolution one.
+      """
+      assert _obj_mesh.cache_info().maxsize is None
 
    def test_obj_mesh_without_faces_is_none(self, tmp_path):
       """Test a file with no geometry is reported as unusable instead of crashing the frame."""
       empty = tmp_path / "empty.obj"
       empty.write_text("# no geometry here\n")
 
-      assert _unit_obj_mesh(str(empty)) is None
+      assert _obj_mesh(str(empty)) is None
 
    def test_neighbor_sphere_has_the_drone_radius(self):
       """Test a sphere neighbor is drawn at exactly its physical radius."""
-      verts, _ = _neighbor_mesh(SPHERE_MODEL, 0.35)
+      mesh, scale = _neighbor_mesh(SPHERE_MODEL, 0.35)
 
-      assert float(np.linalg.norm(verts, axis=1).max()) == pytest.approx(0.35)
+      assert float(np.linalg.norm(mesh.verts * scale, axis=1).max()) == pytest.approx(0.35)
 
    def test_neighbor_obj_longest_axis_is_the_drone_diameter(self):
       """Test the absolute model scale, which the 1/depth² test cannot see (R18).
@@ -279,18 +301,26 @@ class TestMeshes:
       The FPV renders physically: longest axis == 2 * radius. Drawing at the ``radius * 5`` that tools/live_view.py uses would make every
       distance estimate come out 2.5x too close, and only a test that nails the absolute size would notice.
       """
-      verts, _ = _neighbor_mesh(OBJ_MODEL, 0.2)
+      mesh, scale = _neighbor_mesh(OBJ_MODEL, 0.2)
+      verts = mesh.verts * scale
 
       extents = verts.max(axis=0) - verts.min(axis=0)
       assert float(extents.max()) == pytest.approx(0.4)
 
+   def test_neighbors_of_different_size_share_one_mesh(self):
+      """Test the per-drone size is a scale factor, not a second copy of the geometry."""
+      small, _ = _neighbor_mesh(OBJ_MODEL, 0.2)
+      large, _ = _neighbor_mesh(OBJ_MODEL, 0.9)
+
+      assert small is large
+
    def test_box_mesh_matches_the_half_extents(self):
       """Test an obstacle box spans exactly twice its half extents in each axis, with six faces."""
-      verts, faces = _box_mesh(np.array([0.5, 1.0, 2.0]))
+      mesh = _box_mesh((0.5, 1.0, 2.0))
 
-      np.testing.assert_allclose(verts.max(axis=0) - verts.min(axis=0), [1.0, 2.0, 4.0])
-      np.testing.assert_allclose((verts.max(axis=0) + verts.min(axis=0)) / 2, [0.0, 0.0, 0.0])
-      assert len(faces) == 6
+      np.testing.assert_allclose(mesh.verts.max(axis=0) - mesh.verts.min(axis=0), [1.0, 2.0, 4.0])
+      np.testing.assert_allclose((mesh.verts.max(axis=0) + mesh.verts.min(axis=0)) / 2, [0.0, 0.0, 0.0])
+      assert len(mesh.faces) == 6
 
 
 class TestFaceBatching:
@@ -308,18 +338,28 @@ class TestFaceBatching:
 
       assert [group.shape for group in groups] == [(1, 3)]
 
-   def test_groups_are_cached_per_mesh(self):
-      """Test the bucketing depends only on the mesh, so it is not redone every frame."""
-      faces = ((0, 1, 2), (1, 2, 3))
+   def test_buckets_and_colors_are_computed_once_per_mesh(self):
+      """Test the derived draw data is memoised on the mesh, not rebuilt per drone per frame.
 
-      assert _face_groups(faces)[0] is _face_groups(faces)[0]
+      Shading survives the per-drone transform because a mesh is only ever uniformly scaled and translated, and neither changes a face normal's
+      direction — so it can be computed here rather than on every frame's world-space vertices.
+      """
+      mesh = _sphere_mesh()
+
+      assert mesh.groups is mesh.groups
+
+   def test_every_face_gets_a_color(self):
+      """Test the colour list lines up with the index array of its bucket, since the two are zipped when drawing."""
+      for idx, colors in _obj_mesh(str(OBJ_MODEL.path)).groups:
+         assert len(colors) == len(idx)
+         assert all(len(color) == 3 for color in colors)
 
    def test_shading_brightens_a_face_turned_toward_the_light(self):
       """Test the flat shading actually varies with orientation — without it a mesh is a flat silhouette."""
       lit = np.array([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]])       # normal along +z, near the light
       edge_on = np.array([[[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]]])   # normal along x, across the light
 
-      assert _shade((200, 200, 200), lit)[0].max() > _shade((200, 200, 200), edge_on)[0].max()
+      assert max(_shade((200, 200, 200), lit)[0]) > max(_shade((200, 200, 200), edge_on)[0])
 
    def test_shading_ignores_face_winding(self):
       """Test a reversed face is shaded the same.
@@ -329,7 +369,17 @@ class TestFaceBatching:
       face = np.array([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]])
       flipped = face[:, ::-1]
 
-      np.testing.assert_array_equal(_shade((200, 200, 200), face), _shade((200, 200, 200), flipped))
+      assert _shade((200, 200, 200), face) == _shade((200, 200, 200), flipped)
+
+   def test_shading_is_unchanged_by_uniform_scale_and_translation(self):
+      """Test the invariant the per-mesh colour cache rests on: placing a mesh in the world cannot change its shading.
+
+      If this ever stopped holding, cached colours would be silently wrong for every drone away from the origin.
+      """
+      face = np.array([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]])
+      placed = face * 3.7 + np.array([12.0, -4.0, 5.5])
+
+      assert _shade((200, 100, 50), face) == _shade((200, 100, 50), placed)
 
    def test_shading_stays_within_the_base_color(self):
       """Test shading only darkens: the ambient floor keeps a face visible, the base color is the ceiling."""
@@ -339,9 +389,9 @@ class TestFaceBatching:
 
       shaded = _shade((200, 100, 50), faces)
 
-      assert (shaded >= 0).all()
-      assert (shaded <= [200, 100, 50]).all()
-      assert (shaded[:, 0] >= 200 * 0.3).all()
+      assert all(0 <= channel for color in shaded for channel in color)
+      assert all(channel <= ceiling for color in shaded for channel, ceiling in zip(color, (200, 100, 50)))
+      assert all(color[0] >= 200 * 0.3 for color in shaded)
 
 
 class TestDepthCues:
@@ -573,7 +623,7 @@ class TestLazyImport:
       """Test `import drone_sim.perception` stays matplotlib-free.
 
       Not even ``simulation.simulator`` pulls matplotlib — the core is deliberately light, and only the render entry points pay for it. The mesh
-      geometry is shared with the matplotlib overview through ``api.utils.obj_loader``, which is numpy-only precisely so that this holds. Runs in a
+      geometry is shared with the matplotlib overview through ``domain.mesh``, which is numpy-only precisely so that this holds. Runs in a
       subprocess, because matplotlib is long since loaded by the time this test executes.
       """
       src = Path(__file__).resolve().parents[3] / "src"

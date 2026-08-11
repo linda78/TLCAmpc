@@ -76,7 +76,7 @@ def _estimate_from_view(view: CameraView, observed_id: str, position: np.ndarray
                            captured_time=float(view.sim_time), sigma=float(sigma) if sigma is not None else None)
 
 
-def _log_detection(kind: str, view: CameraView, estimates: list[PositionEstimate], *, extra: str = "") -> None:
+def _log_detection(view: CameraView, estimates: list[PositionEstimate], noise_sigma: float) -> None:
    """Emit one grep-able DEBUG summary per detect() call.
 
    The interesting number is ``visible -> estimates``: a detector that sees fewer neighbors than the geometry offers is missing detections, one that
@@ -85,8 +85,8 @@ def _log_detection(kind: str, view: CameraView, estimates: list[PositionEstimate
    """
    if not _log.isEnabledFor(logging.DEBUG):
       return
-   _log.debug("Perception %s detect: observer=%s step=%d t=%.3f | %d visible -> %d estimates %s%s", kind, view.observer_id, view.step, view.sim_time,
-              len(view.visible), len(estimates), [e.observed_id for e in estimates], f" | {extra}" if extra else "")
+   _log.debug("Perception stub detect: observer=%s step=%d t=%.3f | %d visible -> %d estimates %s | noise_sigma=%s", view.observer_id, view.step,
+              view.sim_time, len(view.visible), len(estimates), [e.observed_id for e in estimates], noise_sigma)
 
 
 class StubPerceptionAdapter:
@@ -128,5 +128,5 @@ class StubPerceptionAdapter:
             position = np.asarray(visible.position, dtype=float) + self._rng.normal(0.0, self._noise_sigma, 3)
          estimates.append(_estimate_from_view(view, visible.drone_id, position, sigma))
 
-      _log_detection("stub", view, estimates, extra=f"noise_sigma={self._noise_sigma}")
+      _log_detection(view, estimates, self._noise_sigma)
       return estimates

@@ -107,6 +107,9 @@ def live_view_simulator(sim: Simulator, *, steps: int, step_n: int, sleep_s: flo
 
    gif_out = Path(gif_path) if gif_path is not None else None
 
+   # Resolved once, through the same rule the config uses, so the overview and the FPV camera look for a model in the same places.
+   obj_path = str(resolve_drone_model("obj", obj_name).path) if obj_name else None
+
    frames: list[Image.Image] = []
 
    fig = None
@@ -154,7 +157,6 @@ def live_view_simulator(sim: Simulator, *, steps: int, step_n: int, sleep_s: flo
       admm_iteration_count = sim.coordinator.get_last_iteration_count() if is_distributed else None
       admm_converged = sim.coordinator.get_last_converged() if is_distributed else None
 
-      obj_path = str(Path(__file__).resolve().parent.parent / "src" / "drone_sim" / "resources" / "assets" / obj_name) if obj_name else None
       png_bytes = render_png(room_min=sim.room_min, room_max=sim.room_max, drones=sim.drones,
                              drone_traces=traces, obstacles=sim.obstacles,
                              step_count=sim.step_count, compute_time_s=sim.compute_time_s,
