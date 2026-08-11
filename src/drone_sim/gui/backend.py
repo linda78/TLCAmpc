@@ -45,6 +45,24 @@ class PredictedTrajectory:
 
 
 @dataclass
+class PerceivedMarker:
+    """One neighbor position as a camera *estimated* it — the display counterpart to the drone's true position.
+
+    Read next to the drone it names: the marker sits where ``observer_id``'s camera believes ``observed_id``
+    is, the sphere sits where it actually is, and the gap between them is the estimation error. Several
+    observers seeing the same neighbor produce several markers for it.
+
+    One estimate per ``(observer, observed)`` pair, taken from the perception mailbox: it holds the newest
+    estimate until a newer one replaces it, so a neighbor that has left every field of view keeps its last
+    marker rather than disappearing (see ``PerceptionMailbox.post``).
+    """
+    observer_id: str                 # the drone whose camera produced the estimate
+    observed_id: str                 # the drone the estimate is about
+    position: np.ndarray             # (3,) estimated world position
+    sigma: float | None              # 1-sigma uncertainty in meters, None when the detector reports none
+
+
+@dataclass
 class StepResult:
     drones: list[DroneState]
     safety_radii: list[float]         # current effective safety radius per drone
@@ -56,6 +74,7 @@ class StepResult:
     all_reached: bool = False              # True when all drones are at their destination
     admm_iteration_count: int | None = None  # None for non-ADMM coordinators
     predictions: list[PredictedTrajectory] = field(default_factory=list)
+    perceived: list[PerceivedMarker] = field(default_factory=list)  # empty whenever the scenario runs without a camera
 
 
 @dataclass

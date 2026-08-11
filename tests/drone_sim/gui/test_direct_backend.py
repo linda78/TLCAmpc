@@ -479,3 +479,102 @@ def test_close_without_a_camera_scenario(config_file: Path) -> None:
     backend.close()  # must not raise
 
     assert backend._sim is not None  # the state stays readable after the window closes
+
+
+# --- StepResult.perceived (GUI visibility of the position estimates) ---
+#
+# Synchronous camera throughout: the worker then detects inside step(), so one step() is enough to have
+# estimates in the mailbox, and zero noise makes them exactly the true positions (R5).
+
+PERCEIVED_CONFIG = {
+    **TWO_DRONE_CONFIG,
+    "camera_enabled": True,
+    "camera_async": False,
+    "camera_noise_sigma": 0.0,
+}
+
+
+@pytest.fixture
+def perception_backend(tmp_path: Path) -> DirectBackend:
+    p = tmp_path / "perceived.json"
+    p.write_text(json.dumps(PERCEIVED_CONFIG), encoding="utf-8")
+    backend = DirectBackend()
+    try:
+        backend.load_config(p)
+        yield backend
+    finally:
+        backend.close()
+
+
+def test_perceived_is_empty_without_a_camera(loaded_backend: DirectBackend) -> None:
+    """Every scenario that existed before perception must keep an empty list here, not a crash and not a None."""
+    assert loaded_backend.step().perceived == []
+
+
+def test_perceived_defaults_to_empty_list() -> None:
+    result = StepResult(drones=[], safety_radii=[], last_collisions=[], infeasible=False, infeasible_reason=None, step_count=0, t=0.0)
+    assert result.perceived == []
+
+
+def test_perceived_reports_both_directions(perception_backend: DirectBackend) -> None:
+    """Head-on pair, each inside the other's cone: two observers, one estimate each."""
+    result = perception_backend.step()
+    assert {(m.observer_id, m.observed_id) for m in result.perceived} == {("d1", "d2"), ("d2", "d1")}
+
+
+def test_perceived_position_is_the_state_at_capture_time(perception_backend: DirectBackend) -> None:
+    """Captures run before the drones move, so the first step's estimates are still the start positions.
+
+    Worth knowing when reading the picture: even a perfect sensor puts the marker one step behind the
+    sphere. What the marker shows is where the neighbor was when it was seen, not where it is now.
+    """
+    result = perception_backend.step()
+    seen = {m.observed_id: m.position for m in result.perceived}
+    assert isinstance(seen["d2"], np.ndarray)
+    np.testing.assert_allclose(seen["d1"], [0.0, 0.0, 5.0])
+    np.testing.assert_allclose(seen["d2"], [8.0, 0.0, 5.0])
+
+
+def test_perceived_position_matches_the_previous_true_position(perception_backend: DirectBackend) -> None:
+    """With noise off the estimate is exactly the observed drone's position at the previous step."""
+    previous = {d.drone_id: d.position for d in perception_backend.step().drones}
+    for marker in perception_backend.step().perceived:
+        np.testing.assert_allclose(marker.position, previous[marker.observed_id])
+
+
+def test_perceived_never_contains_the_observer_itself(perception_backend: DirectBackend) -> None:
+    for _ in range(3):
+        result = perception_backend.step()
+    assert all(m.observer_id != m.observed_id for m in result.perceived)
+
+
+def test_perceived_sigma_is_none_without_noise(perception_backend: DirectBackend) -> None:
+    assert all(m.sigma is None for m in perception_backend.step().perceived)
+
+
+def test_perceived_sigma_is_reported_with_noise(tmp_path: Path) -> None:
+    p = tmp_path / "noisy.json"
+    p.write_text(json.dumps({**PERCEIVED_CONFIG, "camera_noise_sigma": 0.25}), encoding="utf-8")
+    backend = DirectBackend()
+    try:
+        backend.load_config(p)
+        result = backend.step()
+        assert result.perceived
+        assert all(m.sigma == pytest.approx(0.25) for m in result.perceived)
+    finally:
+        backend.close()
+
+
+def test_perceived_is_empty_before_the_first_capture(perception_backend: DirectBackend) -> None:
+    """load_config alone captures nothing — the first estimates appear with the first step."""
+    assert perception_backend._make_step_result().perceived == []
+
+
+def test_perceived_tracks_the_moving_drones(perception_backend: DirectBackend) -> None:
+    """Not a one-off snapshot frozen at step 1: the markers follow the drones."""
+    first = perception_backend.step().perceived
+    for _ in range(5):
+        latest = perception_backend.step().perceived
+
+    by_pair = {(m.observer_id, m.observed_id): m.position for m in first}
+    assert any(not np.allclose(by_pair[(m.observer_id, m.observed_id)], m.position) for m in latest)

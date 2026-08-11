@@ -527,6 +527,170 @@ class TestObjModelOverride:
         assert loaded_window._obj_model_label.text() == "Model: scatter"
 
 
+class TestPerceivedMarkers:
+    """The 'x' per camera position estimate: purely additive, and invisible for every scenario without a camera."""
+
+    @pytest.fixture
+    def loaded_window(self, window, tmp_path):
+        """A window with a scenario loaded — needed by the two tests that go through the real drawing paths."""
+        import json
+        from pathlib import Path
+
+        path = Path(tmp_path) / "marker_scenario.json"
+        path.write_text(json.dumps(TestFpvView.FPV_CONFIG), encoding="utf-8")
+        window._backend.load_config(path)
+        window._on_config_loaded(window._backend.get_state())
+        return window
+
+    @staticmethod
+    def _marker(observed_id: str, position, *, observer_id: str = "d1", sigma=None):
+        from drone_sim.gui.backend import PerceivedMarker
+        return PerceivedMarker(observer_id=observer_id, observed_id=observed_id, position=np.asarray(position, dtype=float), sigma=sigma)
+
+    @staticmethod
+    def _drone(drone_id: str, color: str):
+        from drone_sim.gui.backend import DroneState
+        return DroneState(drone_id=drone_id, position=np.zeros(3), velocity=np.zeros(3), radius=0.3, safety_zone=1.0, adaptive_safety_radius=None,
+                          max_adaptive_safety_radius=None, color=color, safety_color=color, trace_color=color)
+
+    @staticmethod
+    def _result(perceived, drones=()):
+        from drone_sim.gui.backend import StepResult
+        return StepResult(drones=list(drones), safety_radii=[], last_collisions=[], infeasible=False, infeasible_reason=None, step_count=1, t=0.1,
+                          perceived=list(perceived))
+
+    class _RecordingAx:
+        """Stand-in for the 3D axes — the helper only ever scatters, so recording that call is the whole contract."""
+
+        def __init__(self):
+            self.calls = []
+
+        def scatter(self, xs, ys, zs, **kwargs):
+            self.calls.append(((xs[0], ys[0], zs[0]), kwargs))
+
+    def test_no_estimates_draws_nothing(self):
+        from drone_sim.gui.main_window import _draw_perceived_markers
+        ax = self._RecordingAx()
+        _draw_perceived_markers(ax, self._result([]))
+        assert ax.calls == []
+
+    def test_one_scatter_per_estimate_at_its_position(self):
+        from drone_sim.gui.main_window import _draw_perceived_markers
+        ax = self._RecordingAx()
+        _draw_perceived_markers(ax, self._result([self._marker("d2", [1.0, 2.0, 3.0]), self._marker("d1", [4.0, 5.0, 6.0], observer_id="d2")],
+                                                 drones=[self._drone("d1", "red"), self._drone("d2", "blue")]))
+
+        assert [pos for pos, _ in ax.calls] == [(1.0, 2.0, 3.0), (4.0, 5.0, 6.0)]
+        assert all(kwargs["marker"] == "x" for _, kwargs in ax.calls)
+
+    def test_marker_takes_the_observed_drones_color(self):
+        """Colored by who is being estimated: the cross then reads as an offset from that drone's own sphere."""
+        from drone_sim.gui.main_window import _draw_perceived_markers
+        ax = self._RecordingAx()
+        _draw_perceived_markers(ax, self._result([self._marker("d2", [1.0, 2.0, 3.0], observer_id="d1")],
+                                                 drones=[self._drone("d1", "red"), self._drone("d2", "blue")]))
+
+        assert ax.calls[0][1]["c"] == ["blue"]
+
+    def test_two_observers_of_one_neighbor_give_two_markers(self):
+        from drone_sim.gui.main_window import _draw_perceived_markers
+        ax = self._RecordingAx()
+        _draw_perceived_markers(ax, self._result([self._marker("d3", [1.0, 0.0, 0.0], observer_id="d1"),
+                                                  self._marker("d3", [1.1, 0.0, 0.0], observer_id="d2")],
+                                                 drones=[self._drone("d3", "green")]))
+
+        assert len(ax.calls) == 2
+        assert all(kwargs["c"] == ["green"] for _, kwargs in ax.calls)
+
+    def test_estimate_about_an_unknown_drone_still_draws(self):
+        """Never drop an estimate just because its subject is gone — it gets the fallback color and stays visible."""
+        from drone_sim.gui.main_window import _PERCEIVED_MARKER_FALLBACK_COLOR, _draw_perceived_markers
+        ax = self._RecordingAx()
+        _draw_perceived_markers(ax, self._result([self._marker("ghost", [1.0, 0.0, 0.0])], drones=[self._drone("d1", "red")]))
+
+        assert ax.calls[0][1]["c"] == [_PERCEIVED_MARKER_FALLBACK_COLOR]
+
+    def test_redraw_adds_one_artist_per_estimate(self, loaded_window):
+        """Through the real axes: the markers reach the live view, and only when there are estimates."""
+        drones = [self._drone("d1", "red"), self._drone("d2", "blue")]
+
+        loaded_window._redraw(self._result([], drones=drones))
+        without = len(loaded_window._ax.collections)
+
+        loaded_window._redraw(self._result([self._marker("d2", [1.0, 2.0, 3.0]), self._marker("d1", [4.0, 5.0, 6.0], observer_id="d2")], drones=drones))
+
+        assert len(loaded_window._ax.collections) == without + 2
+
+    def test_checkbox_is_on_by_default(self, window):
+        """A scenario only produces estimates when it was configured to, so whoever loaded one wants to see them."""
+        assert window._perceived_check.isChecked() is True
+
+    def test_unchecking_removes_the_markers(self, loaded_window):
+        drones = [self._drone("d1", "red"), self._drone("d2", "blue")]
+        result = self._result([self._marker("d2", [1.0, 2.0, 3.0]), self._marker("d1", [4.0, 5.0, 6.0], observer_id="d2")], drones=drones)
+
+        loaded_window._redraw(result)
+        with_markers = len(loaded_window._ax.collections)
+        loaded_window._perceived_check.setChecked(False)
+
+        assert len(loaded_window._ax.collections) == with_markers - 2
+
+    def test_unchecking_repaints_immediately(self, loaded_window, monkeypatch):
+        """Toggling while paused must not wait for the next tick — that would look like a dead checkbox."""
+        redrawn = []
+        monkeypatch.setattr(type(loaded_window), "_redraw", lambda self, result: redrawn.append(result))
+        loaded_window._last_result = self._result([self._marker("d2", [1.0, 2.0, 3.0])], drones=[self._drone("d2", "blue")])
+
+        loaded_window._perceived_check.setChecked(False)
+
+        assert len(redrawn) == 1
+
+    def test_toggling_without_a_result_does_not_raise(self, window):
+        window._perceived_check.setChecked(False)  # nothing loaded yet
+
+    def test_rechecking_brings_them_back(self, loaded_window):
+        drones = [self._drone("d1", "red"), self._drone("d2", "blue")]
+        loaded_window._redraw(self._result([self._marker("d2", [1.0, 2.0, 3.0])], drones=drones))
+        with_markers = len(loaded_window._ax.collections)
+
+        loaded_window._perceived_check.setChecked(False)
+        loaded_window._perceived_check.setChecked(True)
+
+        assert len(loaded_window._ax.collections) == with_markers
+
+    def test_checkbox_survives_a_layout_rebuild(self, loaded_window):
+        """The responsive layout reparents every control — one forgotten widget disappears from the window."""
+        loaded_window._perceived_check.setChecked(False)
+        loaded_window._rebuild_layout()
+
+        assert loaded_window._perceived_check.isChecked() is False
+        assert loaded_window._perceived_check.parent() is not None
+
+    def test_unchecked_screenshot_omits_the_markers(self, loaded_window, tmp_path, monkeypatch):
+        import drone_sim.gui.main_window as m
+        monkeypatch.chdir(tmp_path)
+        drawn = []
+        monkeypatch.setattr(m, "_draw_perceived_markers", lambda ax, result: drawn.append(result.perceived))
+
+        loaded_window._last_result = self._result([self._marker("d2", [1.0, 2.0, 3.0])], drones=[self._drone("d2", "blue")])
+        loaded_window._perceived_check.setChecked(False)
+        loaded_window._on_screenshot()
+
+        assert drawn == []
+
+    def test_screenshot_draws_the_markers_too(self, loaded_window, tmp_path, monkeypatch):
+        """The saved picture is what is on screen — including the crosses."""
+        import drone_sim.gui.main_window as m
+        monkeypatch.chdir(tmp_path)
+        drawn = []
+        monkeypatch.setattr(m, "_draw_perceived_markers", lambda ax, result: drawn.append(result.perceived))
+
+        loaded_window._last_result = self._result([self._marker("d2", [1.0, 2.0, 3.0])], drones=[self._drone("d2", "blue")])
+        loaded_window._on_screenshot()
+
+        assert len(drawn) == 1 and len(drawn[0]) == 1
+
+
 class TestShutdown:
     """closeEvent releases what the backend started in the background."""
 

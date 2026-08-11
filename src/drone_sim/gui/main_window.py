@@ -9,7 +9,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QKeySequence, QPixmap, QShortcut
-from PySide6.QtWidgets import (QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton, QSizePolicy, QSlider, QStackedWidget, QVBoxLayout, QWidget)
 
 from drone_sim.domain.drone_model import DroneModel, resolve_drone_model
 from drone_sim.gui.backend import DroneState, StepResult, SimState
@@ -21,6 +21,9 @@ _PREDICTION_TUBE_SAMPLES = 50           # arc-length samples per BoF prediction 
 _PREDICTION_TUBE_OUTER_ALPHA = 0.03     # safety-zone tube
 _PREDICTION_TUBE_INNER_ALPHA = 0.08     # core (drone-radius) tube
 _PREDICTION_TUBE_CENTERLINE_ALPHA = 0.02  # dashed centerline opacity (drawn once)
+_PERCEIVED_MARKER_SIZE = 55             # 'x' for a camera position estimate, smaller than the 80 of a drone itself
+_PERCEIVED_MARKER_LINEWIDTH = 1.4       # 'x' has no fill — without this it is barely there
+_PERCEIVED_MARKER_FALLBACK_COLOR = "magenta"  # estimate about a drone the scenario no longer has: loud on purpose
 
 _EXTERNAL_VIEW_LABEL = "External view"  # first combo entry — the orbiting 3D scene, itemData None
 _FPV_MIN_SIZE = (320, 240)              # floor for the render size; the label reports garbage before the first layout pass
@@ -31,6 +34,30 @@ def _coerce_color(color):
    if isinstance(color, (list, tuple)):
       return tuple(float(c) for c in color[:3])
    return color
+
+
+def _draw_perceived_markers(ax: object, result: StepResult) -> None:
+   """Mark every camera position estimate with an 'x' in the *observed* drone's color.
+
+   Colored by who is being estimated, not by who is estimating: the marker then sits next to the sphere it
+   belongs to, and the offset between the two reads directly as the estimation error. Two observers of the
+   same neighbor give two same-colored crosses.
+
+   ``sigma`` is deliberately not drawn. Typical values are centimeters, so a sphere of that radius would
+   vanish inside the marker itself; the field is on :class:`PerceivedMarker` for consumers that want the
+   number, not for this view.
+
+   Draws nothing when the scenario has no camera — ``result.perceived`` is empty then.
+   """
+   if not result.perceived:
+      return
+
+   color_by_id = {d.drone_id: _coerce_color(d.color) for d in result.drones}
+   for marker in result.perceived:
+      pos = np.asarray(marker.position, dtype=float).reshape(3)
+      # depthshade off: the cross is a readout, not part of the scene, and must not fade with distance.
+      ax.scatter([pos[0]], [pos[1]], [pos[2]], marker="x", s=_PERCEIVED_MARKER_SIZE, linewidths=_PERCEIVED_MARKER_LINEWIDTH,
+                 c=[color_by_id.get(marker.observed_id, _PERCEIVED_MARKER_FALLBACK_COLOR)], depthshade=False)
 
 
 def _draw_ghost_max_sphere(ax: object, is_adaptive: bool, position, safety_zone:float, max_radius:float, safety_color):
@@ -92,6 +119,14 @@ class MainWindow(QMainWindow):
 
         self._view_combo = QComboBox()
         self._view_combo.addItem(_EXTERNAL_VIEW_LABEL, None)  # itemData carries the drone id, None = external
+
+        # A camera scenario draws one 'x' per observer per neighbor — with four drones that is twelve extra
+        # marks in the scene, which is exactly what you want while looking at the perception and in the way
+        # while looking at anything else. On by default: a scenario only produces estimates when it was
+        # configured to, so someone who loaded one asked to see them.
+        self._perceived_check = QCheckBox("Estimates")
+        self._perceived_check.setChecked(True)
+        self._perceived_check.setToolTip("Show camera position estimates as 'x' markers (only scenarios with camera_enabled produce any)")
 
         # ---- Controls ----
         self._btn_open = QPushButton("Open")
@@ -157,6 +192,7 @@ class MainWindow(QMainWindow):
         self._btn_record.clicked.connect(self._on_record)
         self._btn_obj_model.clicked.connect(self._on_select_obj_model)
         self._view_combo.currentIndexChanged.connect(self._on_view_changed)
+        self._perceived_check.toggled.connect(self._on_perceived_toggled)
         self._speed_slider.valueChanged.connect(self._on_speed_changed)
 
         # ---- Keyboard shortcuts ----
@@ -283,6 +319,11 @@ class MainWindow(QMainWindow):
         if self._last_result is not None:
             self._redraw(self._last_result)
 
+    def _on_perceived_toggled(self, _checked: bool = False) -> None:
+        """Repaint so the markers appear or vanish at once, instead of at the next tick (or never, while paused)."""
+        if self._last_result is not None:
+            self._redraw(self._last_result)
+
     def _update_collision_indicator(self, result: StepResult) -> None:
         if result.last_collisions:
             self._collision_label.setText("COLLISION")
@@ -401,6 +442,9 @@ class MainWindow(QMainWindow):
                 draw_centerline=True,
             )
 
+        # Camera position estimates — drawn last so a cross is never hidden by a tube or a safety sphere.
+        if self._perceived_check.isChecked():
+            _draw_perceived_markers(self._ax, result)
 
         # Set axis limits from room bounds, scaled by zoom level.
         # self._zoom is stored on self (not ax) so ax.cla() never resets it.
@@ -577,6 +621,10 @@ class MainWindow(QMainWindow):
                 centerline_alpha=_PREDICTION_TUBE_CENTERLINE_ALPHA,
                 draw_centerline=True,
             )
+
+        # Same switch as the live view — the screenshot shows what is on screen, markers included or not.
+        if self._perceived_check.isChecked():
+            _draw_perceived_markers(ax, result)
 
         # Axis limits (match live view zoom)
         room_min, room_max = sim_state.room_min, sim_state.room_max
@@ -805,6 +853,7 @@ class MainWindow(QMainWindow):
             # Reparent widgets before deleting layout
             self._view_stack.setParent(None)  # takes canvas + FPV label with it — both stay children of the stack
             self._view_combo.setParent(None)
+            self._perceived_check.setParent(None)
             self._btn_open.setParent(None)
             self._btn_play.setParent(None)
             self._btn_pause.setParent(None)
@@ -843,6 +892,7 @@ class MainWindow(QMainWindow):
             ctrl_layout.addSpacing(10)
             ctrl_layout.addWidget(QLabel("View:"))
             ctrl_layout.addWidget(self._view_combo)
+            ctrl_layout.addWidget(self._perceived_check)
             ctrl_layout.addSpacing(15)
             ctrl_layout.addWidget(self._info_box)
             ctrl_layout.addWidget(self._collision_label)
@@ -877,6 +927,7 @@ class MainWindow(QMainWindow):
             ctrl_layout.addWidget(self._btn_obj_model)
             ctrl_layout.addWidget(QLabel("View:"))
             ctrl_layout.addWidget(self._view_combo)
+            ctrl_layout.addWidget(self._perceived_check)
             ctrl_layout.addStretch()
             ctrl_layout.addWidget(QLabel("Speed:"))
             self._speed_slider.setOrientation(Qt.Orientation.Horizontal)

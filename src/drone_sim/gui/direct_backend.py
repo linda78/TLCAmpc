@@ -9,7 +9,7 @@ from drone_sim.domain.config import ScenarioConfig
 from drone_sim.domain.drone_model import DroneModel
 from drone_sim.perception import CameraModel, render_fpv_png
 from drone_sim.simulation.simulator import Simulator
-from drone_sim.gui.backend import (SimulationBackend, SimState, DroneState, StepResult, PredictedTrajectory, )
+from drone_sim.gui.backend import (SimulationBackend, SimState, DroneState, StepResult, PredictedTrajectory, PerceivedMarker, )
 
 
 class DirectBackend(SimulationBackend):
@@ -210,4 +210,24 @@ class DirectBackend(SimulationBackend):
 
       return StepResult(drones=drone_states, safety_radii=safety_radii, last_collisions=list(sim.last_collisions), infeasible=bool(sim.infeasible),
             infeasible_reason=sim.infeasible_reason, step_count=sim.step_count, t=float(sim.t), all_reached=all_reached,
-            admm_iteration_count=admm_iteration_count, predictions=predictions)
+            admm_iteration_count=admm_iteration_count, predictions=predictions, perceived=self._harvest_perceived())
+
+   def _harvest_perceived(self) -> list[PerceivedMarker]:
+      """Current position estimates of every drone's camera, flattened for display. Empty without perception.
+
+      Read off the simulation by name (same duck-typing as the BoF provider above), so a scenario without a
+      camera — every existing one — costs a single ``getattr`` and produces an empty list.
+
+      The observers are enumerated from ``sim.drones`` rather than from the mailbox, which exposes no observer
+      listing: a drone that has not seen anything yet simply contributes nothing.
+      """
+      mailbox = getattr(self._sim, "_perception_mailbox", None)
+      if mailbox is None:
+         return []
+
+      markers: list[PerceivedMarker] = []
+      for drone in self._sim.drones:
+         for estimate in mailbox.latest(drone.drone_id).values():
+            markers.append(PerceivedMarker(observer_id=drone.drone_id, observed_id=estimate.observed_id,
+                                           position=np.asarray(estimate.position, dtype=float), sigma=estimate.sigma))
+      return markers
