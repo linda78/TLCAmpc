@@ -11,6 +11,10 @@ _log = logging.getLogger(__name__)
 
 from drone_sim.domain.drone import Drone, has_central_cost
 from drone_sim.domain.registry import register_coordinator
+# Submodule import on purpose: `from drone_sim.perception import ...` would pull the whole package
+# surface (renderer, worker, adapters) into every coordinator import. The bridge itself imports
+# TrajectoryMessage function-locally, so this direction stays acyclic.
+from drone_sim.perception.bridge import feed_trajectory_mailbox
 from drone_sim.simulation.distributed.admm_state import ADMMState
 from drone_sim.simulation.distributed.local_mpc import LocalMPCSolver, _pad_or_trim_horizon
 from drone_sim.simulation.distributed.neighbor_graph import NeighborGraph
@@ -57,16 +61,44 @@ class DistributedMPCCoordinator:
       self._admm_state = ADMMState(rho=self.rho, primal_tol=self.primal_tol, dual_tol=self.dual_tol, horizon=self.horizon, )
 
    def solve_controls(self, *, drones: list[Drone], obstacles: list[tuple[np.ndarray, np.ndarray]], room_min: np.ndarray | None = None,
-                      room_max: np.ndarray | None = None, lstm_provider: object | None = None, ) -> dict[str, np.ndarray]:
+                      room_max: np.ndarray | None = None, lstm_provider: object | None = None,
+                      perception_mailbox: object | None = None, ) -> dict[str, np.ndarray]:
       """Solve for drone controls using distributed ADMM optimization.
       Matches the CentralMPCGlobalCoordinator interface.
+
+      **Perception mode.** Passing a ``perception_mailbox`` replaces the source of every neighbor
+      trajectory: instead of the drones broadcasting their true optimized trajectories to each other,
+      each drone's inbox is filled once from what *its own camera* estimated, via
+      :func:`~drone_sim.perception.bridge.feed_trajectory_mailbox`. That changes the algorithm, not
+      just the data:
+
+      * **No consensus.** ADMM negotiates by re-broadcasting; a camera does not renegotiate. The
+        estimates are a fixed snapshot, so a second iteration would solve against exactly the same
+        neighbor data and only add cost. The loop therefore runs a *single* pass
+        (``effective_max_iter = 1``), both re-broadcast points are suppressed, and ``converged`` is
+        reported as ``True`` -- there is nothing left to converge to, and the non-convergence
+        RuntimeWarning would otherwise fire on every simulation step (risk R4 of the perception plan).
+        ``get_last_residuals()`` still reports the ADMM residuals, but they measure a single
+        unnegotiated pass and should not be read as a consensus quality.
+      * **NeighborGraph limitation (design decision 4).** The graph is still built from *true*
+        positions and still decides priority ordering and the neighbor pairs that drive ``update_z``.
+        Only the inbox content comes from perception. The bridge delivers directly, bypassing the
+        graph's comm-radius routing, because visibility already made that decision -- so a drone that
+        nobody's camera saw is simply absent from every solve, which is the intended field-of-view
+        blindness rather than a bug.
 
       :param drones: List of Drone objects to optimize
       :param obstacles: List of (center, half_extents) static obstacles
       :param room_min: Room lower bounds (3,) or None
       :param room_max: Room upper bounds (3,) or None
+      :param lstm_provider: Optional provider of per-neighbor LSTM safety radii, or None
+      :param perception_mailbox: Optional :class:`~drone_sim.perception.mailbox.PerceptionMailbox`.
+         ``None`` (the default) keeps the classic true-state ADMM behaviour untouched.
       :return: Dict mapping drone_id to control (3,) for first timestep
       """
+      perception_active = perception_mailbox is not None
+      effective_max_iter = 1 if perception_active else self.max_admm_iter
+
       # Identify which drones to optimize (must have central_cost interface)
       opt_drones = [d for d in drones if has_central_cost(d.controller)]
 
@@ -119,7 +151,7 @@ class DistributedMPCCoordinator:
       stagnation_count = 0
 
       iteration = 0
-      for iteration in range(self.max_admm_iter):
+      for iteration in range(effective_max_iter):
          # Determine drone solving order for this iteration
          drone_order = list(opt_ids)
          if self.gauss_seidel:
@@ -130,10 +162,8 @@ class DistributedMPCCoordinator:
                # Later iterations: priority-based ordering (most constrained first)
                drone_order.sort(key=lambda d: self._compute_priority(d, trajectories, velocities, all_drones_by_id, lstm_radii_by_drone))
 
-         # 3a. Broadcast current trajectories via mailbox (initial state)
-         self._mailbox.clear()
-         for drone_id in opt_ids:
-            self._mailbox.broadcast(sender_id=drone_id, trajectory=trajectories[drone_id], predicted_velocities=None, timestamp=0, neighbor_graph=self._neighbor_graph)
+         # 3a. Fill every inbox with the neighbor information for this iteration
+         self._publish_neighbor_info(trajectories=trajectories, opt_ids=opt_ids, drones=drones, perception_mailbox=perception_mailbox)
 
          # 3b. For each drone: receive neighbors, solve local MPC
          if self.gauss_seidel:
@@ -161,13 +191,16 @@ class DistributedMPCCoordinator:
                controls[drone_id] = u_opt
                velocities[drone_id] = vel_opt
 
-               # Broadcast immediately so next drone sees updated trajectory
-               self._mailbox.broadcast(sender_id=drone_id, trajectory=traj_opt,
-                                       predicted_velocities=vel_opt, timestamp=0,
-                                       neighbor_graph=self._neighbor_graph)
+               # Broadcast immediately so next drone sees updated trajectory.
+               # Suppressed under perception: the inbox holds camera estimates, and overwriting them
+               # with a solved trajectory would silently reintroduce true-state knowledge.
+               if not perception_active:
+                  self._mailbox.broadcast(sender_id=drone_id, trajectory=traj_opt,
+                                          predicted_velocities=vel_opt, timestamp=0,
+                                          neighbor_graph=self._neighbor_graph)
          else:
             # Jacobi: all drones use stale data, update all at once
-            trajectories, controls, velocities = self._jacobi(drone_order, drone_by_id, local_solvers, iteration, obstacles, room_min, room_max, prev_controls=controls, lstm_radii_by_drone=lstm_radii_by_drone)
+            trajectories, controls, velocities = self._jacobi(drone_order, drone_by_id, local_solvers, iteration, obstacles, room_min, room_max, prev_controls=controls, lstm_radii_by_drone=lstm_radii_by_drone, broadcast=not perception_active)
 
          # 3c. Stagnation detection — break early if no drone made progress
          stagnated, prev_trajectories, stagnation_count = self._check_stagnation(
@@ -183,6 +216,11 @@ class DistributedMPCCoordinator:
          if self._admm_state.is_converged(trajectories):
             converged = True
             break
+
+      # A single pass against a fixed perception snapshot is the whole algorithm here, so it is
+      # "converged" by construction — see the perception-mode note in the docstring (risk R4).
+      if perception_active:
+         converged = True
 
       # Store iteration count for debugging/testing
       self._last_iteration_count = iteration + 1
@@ -210,6 +248,36 @@ class DistributedMPCCoordinator:
 
       return result
 
+   def _publish_neighbor_info(self, *, trajectories: dict[str, np.ndarray], opt_ids: list[str], drones: list[Drone],
+                              perception_mailbox: object | None) -> None:
+      """Refill every inbox with the neighbor information one ADMM iteration is going to solve against.
+
+      The two branches differ only in *where* the neighbor trajectories come from — true-state
+      broadcasts routed through the NeighborGraph, or camera estimates delivered straight to the
+      observer that produced them. Both start from an empty mailbox: the perception bridge upserts
+      per sender and never expires anything, so without the ``clear()`` a neighbor that drifted out
+      of the field of view would keep haunting the inbox with its last sighting forever.
+
+      :param trajectories: Current trajectory per drone_id, used only in true-state mode.
+      :param opt_ids: IDs of the drones being optimized — the only ones that read an inbox.
+      :param drones: All drones, for the ``drone_id -> safety_zone`` map handed to the bridge.
+      :param perception_mailbox: :class:`~drone_sim.perception.mailbox.PerceptionMailbox` to read
+         estimates from, or ``None`` for the classic true-state broadcast.
+      """
+      self._mailbox.clear()
+
+      if perception_mailbox is None:
+         for drone_id in opt_ids:
+            self._mailbox.broadcast(sender_id=drone_id, trajectory=trajectories[drone_id], predicted_velocities=None, timestamp=0,
+                                    neighbor_graph=self._neighbor_graph)
+         return
+
+      # timestamp_mode="step" because this coordinator is synchronous and never compares a message
+      # timestamp against a wall clock; a monotonic stamp here would be meaningless (see R1).
+      feed_trajectory_mailbox(perception=perception_mailbox, trajectory_mailbox=self._mailbox, receiver_ids=opt_ids, horizon=self.horizon,
+                              dt=self.dt, timestamp_mode="step", step=0,
+                              safety_zone_by_id={d.drone_id: d.safety_zone for d in drones})
+
    def _warm_start_controls(self, drone_id: str, iteration: int, controls: dict[str, np.ndarray]) -> np.ndarray | None:
       """Pick the best warm-start control sequence for a drone.
 
@@ -232,8 +300,14 @@ class DistributedMPCCoordinator:
                obstacles: list[tuple[np.ndarray, np.ndarray]] | None = None, room_min: np.ndarray | None = None,
                room_max: np.ndarray | None = None,
                prev_controls: dict[str, np.ndarray] | None = None,
-               lstm_radii_by_drone: dict[str, dict[str, np.ndarray]] | None = None) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]:
-      """Jacobi update: all drones solve using stale neighbor data, then update all at once."""
+               lstm_radii_by_drone: dict[str, dict[str, np.ndarray]] | None = None,
+               broadcast: bool = True) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]:
+      """Jacobi update: all drones solve using stale neighbor data, then update all at once.
+
+      :param broadcast: Whether the solved trajectories are published back into the mailbox.
+         ``False`` in perception mode, where the inbox belongs to the camera and must not be
+         overwritten with true-state trajectories.
+      """
       lstm_radii_by_drone = lstm_radii_by_drone or {}
       new_trajectories: dict[str, np.ndarray] = {}
       new_controls: dict[str, np.ndarray] = {}
@@ -262,10 +336,11 @@ class DistributedMPCCoordinator:
          new_velocities[drone_id] = vel_opt
 
       # Broadcast updated trajectories with velocities (no extra _predict_states call)
-      for drone_id in drone_order:
-         self._mailbox.broadcast(sender_id=drone_id, trajectory=new_trajectories[drone_id],
-                                 predicted_velocities=new_velocities[drone_id], timestamp=0,
-                                 neighbor_graph=self._neighbor_graph)
+      if broadcast:
+         for drone_id in drone_order:
+            self._mailbox.broadcast(sender_id=drone_id, trajectory=new_trajectories[drone_id],
+                                    predicted_velocities=new_velocities[drone_id], timestamp=0,
+                                    neighbor_graph=self._neighbor_graph)
 
       return new_trajectories, new_controls, new_velocities
 

@@ -10,9 +10,12 @@ import time
 import numpy as np
 import pytest
 
+from drone_sim.simulation.distributed import threaded_coordinator
 from drone_sim.simulation.distributed.threaded_coordinator import ThreadedMPCCoordinator
+from drone_sim.simulation.distributed.threaded_mailbox import ThreadSafeMailbox
 from drone_sim.domain.registry import COORDINATORS
 from drone_sim.domain.drone import Drone, Route
+from drone_sim.perception.mailbox import PerceptionMailbox, PositionEstimate
 from drone_sim.physics.linear_kinematics import LinearKinematicsPhysics
 from drone_sim.controllers.central_cost import CentralMPCAgent
 
@@ -455,3 +458,202 @@ class TestThreadedCoordinatorIntegration:
         assert "drone-1" in result
         assert result["drone-1"].shape == (3,)
         assert np.all(np.isfinite(result["drone-1"]))
+
+
+class _RecordingMailbox(ThreadSafeMailbox):
+    """ThreadSafeMailbox that records how its inbox was filled.
+
+    The threaded coordinator builds its mailbox internally, so a test cannot inspect it afterwards
+    without getting hold of the instance. Counting ``broadcast`` versus ``deliver`` is also exactly
+    the distinction under test: ``broadcast`` is negotiation (bootstrap + solver threads),
+    ``deliver`` is the perception bridge.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.broadcast_calls: list[str] = []
+        self.delivered: list[tuple[str, str]] = []
+
+    def broadcast(self, sender_id, message, neighbor_ids):
+        self.broadcast_calls.append(sender_id)
+        super().broadcast(sender_id, message, neighbor_ids)
+
+    def deliver(self, receiver_id, message):
+        self.delivered.append((receiver_id, message.drone_id))
+        super().deliver(receiver_id, message)
+
+
+def _perception(sightings: dict[str, dict[str, tuple[float, float, float]]]) -> PerceptionMailbox:
+    """Hand-fill a PerceptionMailbox: ``{observer: {observed: position}}``, one capture at t=0."""
+    perception = PerceptionMailbox()
+    for observer_id, observed in sightings.items():
+        perception.post(observer_id, [
+            PositionEstimate(observer_id=observer_id, observed_id=observed_id,
+                             position=np.array(position, dtype=float), captured_step=0, captured_time=0.0)
+            for observed_id, position in observed.items()
+        ])
+    return perception
+
+
+class TestThreadedCoordinatorPerceptionMode:
+    """Tests for the perception seam on the threaded coordinator.
+
+    Three things must hold: the inbox comes from the bridge and nothing broadcasts over it, the
+    timestamps are monotonic (or ``_filter_stale`` would silently empty every inbox — R1), and a
+    drone that sees nothing must still solve instead of stalling the whole step (R6).
+    """
+
+    @pytest.fixture
+    def recorder(self, monkeypatch) -> _RecordingMailbox:
+        """Force the coordinator to use one inspectable mailbox instead of a fresh internal one."""
+        mailbox = _RecordingMailbox()
+        monkeypatch.setattr(threaded_coordinator, "ThreadSafeMailbox", lambda: mailbox)
+        return mailbox
+
+    @staticmethod
+    def _drones() -> list[Drone]:
+        return [
+            create_test_drone("drone-1", np.array([0.0, 0.0, 0.0])),
+            create_test_drone("drone-2", np.array([5.0, 0.0, 0.0])),
+        ]
+
+    def test_perception_mailbox_yields_controls(self):
+        """Test a hand-filled PerceptionMailbox produces finite controls for every drone."""
+        coordinator = ThreadedMPCCoordinator(dt=0.1, horizon=3, max_iterations=5, convergence_timeout_sec=5.0)
+        perception = _perception({"drone-1": {"drone-2": (5.0, 0.0, 0.0)}, "drone-2": {"drone-1": (0.0, 0.0, 0.0)}})
+
+        result = coordinator.solve_controls(drones=self._drones(), obstacles=[], perception_mailbox=perception)
+
+        assert set(result) == {"drone-1", "drone-2"}
+        for control in result.values():
+            assert control.shape == (3,)
+            assert np.all(np.isfinite(control))
+
+    def test_inbox_holds_only_bridge_messages(self, recorder):
+        """Test neither the bootstrap nor a solver thread broadcasts over the camera snapshot."""
+        coordinator = ThreadedMPCCoordinator(dt=0.1, horizon=3, max_iterations=5, convergence_timeout_sec=5.0)
+        # drone-1 is told it saw drone-2 50 m off its true position: any true-state broadcast would show.
+        perception = _perception({"drone-1": {"drone-2": (50.0, 0.0, 0.0)}})
+
+        coordinator.solve_controls(drones=self._drones(), obstacles=[], perception_mailbox=perception)
+
+        assert recorder.broadcast_calls == []
+        assert recorder.delivered == [("drone-1", "drone-2")]
+        inbox = recorder.receive_latest("drone-1")
+        assert set(inbox) == {"drone-2"}
+        # One estimate means no velocity information, so the extrapolation must be a constant.
+        np.testing.assert_allclose(inbox["drone-2"].trajectory, np.tile([50.0, 0.0, 0.0], (3, 1)))
+
+    def test_bridge_messages_carry_monotonic_timestamps(self, recorder):
+        """Test R1: the stamps are wall-clock monotonic, not step indices that _filter_stale would age out."""
+        coordinator = ThreadedMPCCoordinator(dt=0.1, horizon=3, max_iterations=5, convergence_timeout_sec=5.0)
+        perception = _perception({"drone-1": {"drone-2": (5.0, 0.0, 0.0)}})
+
+        coordinator.solve_controls(drones=self._drones(), obstacles=[], perception_mailbox=perception)
+
+        timestamp = recorder.receive_latest("drone-1")["drone-2"].timestamp
+        # A "step" stamp would be 0 here and therefore look older than the process uptime.
+        assert timestamp == pytest.approx(time.monotonic(), abs=5.0)
+
+    def test_perceived_neighbor_reaches_the_solver(self, recorder):
+        """Test the delivered message is actually consumed: the solver runs and leaves a warm start behind."""
+        coordinator = ThreadedMPCCoordinator(dt=0.1, horizon=3, max_iterations=5, convergence_timeout_sec=5.0)
+        perception = _perception({"drone-1": {"drone-2": (5.0, 0.0, 0.0)}, "drone-2": {"drone-1": (0.0, 0.0, 0.0)}})
+
+        coordinator.solve_controls(drones=self._drones(), obstacles=[], perception_mailbox=perception)
+
+        assert coordinator.get_last_iteration_count() >= 1
+        assert coordinator.get_last_converged() is True
+
+    def test_empty_field_of_view_does_not_burn_the_timeout(self):
+        """Test R6: without allow_empty_inbox a blind drone never solves, traj_prev stays None, and the
+        convergence poll spends the whole convergence_timeout_sec — every single simulation step.
+
+        The bound is generous but finite on purpose: this pins the regression instead of hanging the suite.
+        """
+        timeout_sec = 3.0
+        coordinator = ThreadedMPCCoordinator(dt=0.1, horizon=3, max_iterations=5, convergence_timeout_sec=timeout_sec)
+
+        started = time.monotonic()
+        result = coordinator.solve_controls(drones=self._drones(), obstacles=[],
+                                            perception_mailbox=PerceptionMailbox())
+        elapsed = time.monotonic() - started
+
+        assert elapsed < timeout_sec, f"solve_controls ran into the convergence timeout ({elapsed:.2f}s)"
+        assert coordinator.get_last_converged() is True
+        # A drone that sees nothing plans alone — it must still produce a real control, not the zero fallback.
+        assert set(result) == {"drone-1", "drone-2"}
+        for control in result.values():
+            assert np.all(np.isfinite(control))
+
+    def test_partially_blind_swarm_still_converges(self):
+        """Test the mixed case: one drone sees a neighbor, the other sees nothing at all."""
+        timeout_sec = 3.0
+        coordinator = ThreadedMPCCoordinator(dt=0.1, horizon=3, max_iterations=5, convergence_timeout_sec=timeout_sec)
+        perception = _perception({"drone-1": {"drone-2": (5.0, 0.0, 0.0)}})
+
+        started = time.monotonic()
+        result = coordinator.solve_controls(drones=self._drones(), obstacles=[], perception_mailbox=perception)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < timeout_sec
+        assert set(result) == {"drone-1", "drone-2"}
+        assert coordinator.get_last_converged() is True
+
+    def test_solvers_are_configured_for_perception(self, monkeypatch):
+        """Test the two AsyncLocalSolver switches are actually flipped — they are what R6 hinges on."""
+        built: list[dict] = []
+        original = threaded_coordinator.AsyncLocalSolver
+
+        def _spy(**kwargs):
+            built.append(kwargs)
+            return original(**kwargs)
+
+        monkeypatch.setattr(threaded_coordinator, "AsyncLocalSolver", _spy)
+        coordinator = ThreadedMPCCoordinator(dt=0.1, horizon=3, max_iterations=5, convergence_timeout_sec=5.0)
+
+        coordinator.solve_controls(drones=self._drones(), obstacles=[],
+                                   perception_mailbox=_perception({"drone-1": {"drone-2": (5.0, 0.0, 0.0)}}))
+
+        assert built and all(kwargs["broadcast_enabled"] is False for kwargs in built)
+        assert all(kwargs["allow_empty_inbox"] is True for kwargs in built)
+
+
+class TestThreadedCoordinatorPerceptionRegression:
+    """Tests that ``perception_mailbox=None`` leaves the negotiating coordinator exactly as it was."""
+
+    @staticmethod
+    def _drones() -> list[Drone]:
+        return [
+            create_test_drone("drone-1", np.array([0.0, 0.0, 0.0])),
+            create_test_drone("drone-2", np.array([5.0, 0.0, 0.0])),
+        ]
+
+    def test_default_path_still_bootstraps_and_broadcasts(self, monkeypatch):
+        """Test the true-state bootstrap still runs and the bridge is never touched."""
+        mailbox = _RecordingMailbox()
+        monkeypatch.setattr(threaded_coordinator, "ThreadSafeMailbox", lambda: mailbox)
+        coordinator = ThreadedMPCCoordinator(dt=0.1, horizon=3, max_iterations=5, convergence_timeout_sec=5.0)
+
+        result = coordinator.solve_controls(drones=self._drones(), obstacles=[], perception_mailbox=None)
+
+        assert sorted(set(mailbox.broadcast_calls)) == ["drone-1", "drone-2"]
+        assert mailbox.delivered == []
+        assert set(result) == {"drone-1", "drone-2"}
+
+    def test_default_solvers_keep_broadcasting_and_skip_empty_inboxes(self, monkeypatch):
+        """Test the two new AsyncLocalSolver switches keep their backwards-compatible defaults."""
+        built: list[dict] = []
+        original = threaded_coordinator.AsyncLocalSolver
+
+        def _spy(**kwargs):
+            built.append(kwargs)
+            return original(**kwargs)
+
+        monkeypatch.setattr(threaded_coordinator, "AsyncLocalSolver", _spy)
+        coordinator = ThreadedMPCCoordinator(dt=0.1, horizon=3, max_iterations=5, convergence_timeout_sec=5.0)
+
+        coordinator.solve_controls(drones=self._drones(), obstacles=[])
+
+        assert built and all(kwargs["broadcast_enabled"] is True for kwargs in built)
+        assert all(kwargs["allow_empty_inbox"] is False for kwargs in built)

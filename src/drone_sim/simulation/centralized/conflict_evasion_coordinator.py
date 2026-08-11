@@ -60,6 +60,7 @@ class ConflictEvasionCentralCoordinator(CentralMPCGlobalCoordinator):
         room_min: np.ndarray | None = None,
         room_max: np.ndarray | None = None,
         lstm_provider: object | None = None,
+        perception_mailbox: object | None = None,
     ) -> dict[str, np.ndarray]:
         """Solve with pre-solve conflict detection and evasion waypoint injection.
 
@@ -69,6 +70,11 @@ class ConflictEvasionCentralCoordinator(CentralMPCGlobalCoordinator):
         4. Call parent solve_controls().
         5. Restore original routes.
         6. Return controls.
+
+        :param perception_mailbox: **Accepted and ignored**, forwarded to
+           :meth:`CentralMPCGlobalCoordinator.solve_controls`, which logs it at DEBUG and drops it —
+           a central solve has no per-drone inbox to feed. Present so the simulator can pass the
+           kwarg unconditionally.
         """
         # 1. Get predicted trajectories for conflict detection
         trajectories = self._get_predicted_trajectories(drones)
@@ -113,6 +119,7 @@ class ConflictEvasionCentralCoordinator(CentralMPCGlobalCoordinator):
             room_min=room_min,
             room_max=room_max,
             lstm_provider=lstm_provider,
+            perception_mailbox=perception_mailbox,
         )
 
         # 5. Restore modified routes

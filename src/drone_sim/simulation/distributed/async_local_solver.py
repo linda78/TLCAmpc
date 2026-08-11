@@ -40,6 +40,13 @@ class AsyncLocalSolver:
     - Designed to run in a dedicated thread per drone
     - Uses ThreadSafeMailbox for inter-drone communication
     - No internal locks needed (single-threaded per instance)
+
+    Perception mode (``broadcast_enabled=False`` + ``allow_empty_inbox=True``): the inbox is no
+    longer a negotiation channel but a snapshot of what this drone's camera saw, delivered once by
+    :func:`~drone_sim.perception.bridge.feed_trajectory_mailbox` before the threads are spawned.
+    The loop then degenerates to a single solve against that snapshot -- nothing broadcasts, so
+    nothing notifies, so ``wait_for_update`` times out on every later pass and the trajectory stays
+    put. That stability is what the coordinator's convergence poll observes.
     """
 
     def __init__(
@@ -53,6 +60,8 @@ class AsyncLocalSolver:
         stale_threshold_sec: float = 1.0,
         u_prev: np.ndarray | None = None,
         lstm_radii: "dict[str, np.ndarray] | None" = None,
+        broadcast_enabled: bool = True,
+        allow_empty_inbox: bool = False,
     ) -> None:
         """Initialize AsyncLocalSolver.
 
@@ -67,6 +76,18 @@ class AsyncLocalSolver:
         :param lstm_radii: Pre-computed LSTM safety radii snapshot from main thread.
             Dict mapping neighbor_id -> np.ndarray(H,) or None when lstm_provider is None.
             Set once at construction time; solver threads read it as-is (no mutation).
+        :param broadcast_enabled: Whether a finished solve is published back to the neighbors.
+            ``False`` in perception mode: the inbox is a camera snapshot written once by
+            :func:`~drone_sim.perception.bridge.feed_trajectory_mailbox` on the main thread, and
+            re-broadcasting an optimized trajectory on top of it would mix negotiated intent into
+            what is supposed to be pure observation.
+        :param allow_empty_inbox: Whether a solve runs even when no neighbor message is present.
+            ``False`` (the default) skips the solve, because in negotiation mode an empty inbox
+            just means the neighbors have not spoken yet. ``True`` in perception mode, where an
+            empty inbox is a legitimate terminal state -- an empty field of view. Leaving this at
+            ``False`` under perception would make such a drone never solve at all, ``traj_prev``
+            would stay ``None``, and the coordinator's convergence poll would burn its full
+            timeout every single step (risk R6 of the perception plan).
         """
         self.drone = drone
         self.mailbox = mailbox
@@ -76,6 +97,8 @@ class AsyncLocalSolver:
         self.max_iterations = max_iterations
         self.convergence_threshold = convergence_threshold
         self.stale_threshold_sec = stale_threshold_sec
+        self.broadcast_enabled = broadcast_enabled
+        self.allow_empty_inbox = allow_empty_inbox
 
         # Warm-start state
         self.u_prev: np.ndarray | None = u_prev
@@ -134,8 +157,9 @@ class AsyncLocalSolver:
             # Receive latest messages
             messages = self.mailbox.receive_latest(self.drone.drone_id)
 
-            # Skip if no messages (first iteration with no data)
-            if not messages:
+            # Skip if no messages (first iteration with no data). Under perception the drone may
+            # legitimately see nothing at all, and then it has to plan alone rather than never plan.
+            if not messages and not self.allow_empty_inbox:
                 continue
 
             # Filter stale data
@@ -167,8 +191,9 @@ class AsyncLocalSolver:
             if not success:
                 _log.warning("Solver failed for %s at iteration %d", self.drone.drone_id, self.iteration_count)
 
-            # Broadcast trajectory to neighbors
-            self._broadcast_trajectory(u_opt, traj_opt, vel_opt)
+            # Broadcast trajectory to neighbors (suppressed in perception mode, see broadcast_enabled)
+            if self.broadcast_enabled:
+                self._broadcast_trajectory(u_opt, traj_opt, vel_opt)
 
             # Update warm-start state
             self.u_prev = u_opt

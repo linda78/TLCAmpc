@@ -54,6 +54,7 @@ class ConflictEvasionDistributedCoordinator(DistributedMPCCoordinator):
         room_min: np.ndarray | None = None,
         room_max: np.ndarray | None = None,
         lstm_provider: object | None = None,
+        perception_mailbox: object | None = None,
     ) -> dict[str, np.ndarray]:
         """Solve with pre-solve conflict detection and evasion waypoint injection.
 
@@ -65,6 +66,12 @@ class ConflictEvasionDistributedCoordinator(DistributedMPCCoordinator):
            internally (idempotent).
         6. Restore original routes.
         7. Return controls.
+
+        :param perception_mailbox: Passed straight through to
+           :meth:`DistributedMPCCoordinator.solve_controls`, which switches to single-pass
+           perception mode when it is not ``None``. Conflict detection itself stays on true
+           positions and true warm-start trajectories — it is a pre-solve safety net, not part
+           of the perception loop.
         """
         # 1. Update neighbor graph before calling init_trajectories so that
         #    neighbor pairs are available for conflict detection.
@@ -108,6 +115,7 @@ class ConflictEvasionDistributedCoordinator(DistributedMPCCoordinator):
             room_min=room_min,
             room_max=room_max,
             lstm_provider=lstm_provider,
+            perception_mailbox=perception_mailbox,
         )
 
         # 6. Restore modified routes

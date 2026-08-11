@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -7,6 +8,8 @@ import numpy as np
 from drone_sim.domain.drone import Drone
 from drone_sim.domain.registry import register_coordinator
 from drone_sim.simulation.centralized.global_mpc import GlobalMPCSolver
+
+_log = logging.getLogger(__name__)
 
 
 @register_coordinator("mpc_central")
@@ -45,7 +48,23 @@ class CentralMPCGlobalCoordinator:
       )
 
    def solve_controls(self, *, drones: list[Drone], obstacles: list[tuple[np.ndarray, np.ndarray]], room_min: np.ndarray | None = None,
-         room_max: np.ndarray | None = None, lstm_provider: object | None = None) -> dict[str, np.ndarray]:
+         room_max: np.ndarray | None = None, lstm_provider: object | None = None,
+         perception_mailbox: object | None = None) -> dict[str, np.ndarray]:
+      """Solve the global MPC problem for all drones with a central-cost controller.
+
+      :param drones: Drones to optimize
+      :param obstacles: List of (center, half_extents) static obstacles
+      :param room_min: Room lower bounds (3,) or None
+      :param room_max: Room upper bounds (3,) or None
+      :param lstm_provider: Optional provider of per-drone LSTM safety radii, or None
+      :param perception_mailbox: **Accepted and ignored.** A central optimizer sees every drone's
+         true state by definition — there is no inbox to feed and no per-drone field of view to
+         restrict it to. The parameter exists only so the simulator can hand the mailbox to whatever
+         coordinator is configured without first asking what kind it is.
+      :return: Dict mapping drone_id to control (3,) for the first timestep
+      """
+      if perception_mailbox is not None:
+         _log.debug("CentralMPCGlobalCoordinator ignores perception_mailbox: central MPC optimizes on true states.")
 
       # Compute lstm_radii from provider if available (once before SLSQP).
       # Central MPC uses evaluate_multi() which takes a flat dict keyed by drone_id.

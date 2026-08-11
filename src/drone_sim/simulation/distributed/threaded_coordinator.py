@@ -18,6 +18,8 @@ import numpy as np
 
 from drone_sim.domain.drone import Drone, has_central_cost
 from drone_sim.domain.registry import register_coordinator
+# Submodule import on purpose -- see the same note in distributed_coordinator.py.
+from drone_sim.perception.bridge import feed_trajectory_mailbox
 from drone_sim.simulation.distributed.thread_lifecycle import ThreadLifecycleManager
 from drone_sim.simulation.distributed.threaded_mailbox import ThreadSafeMailbox
 from drone_sim.simulation.distributed.neighbor_graph import NeighborGraph
@@ -77,6 +79,7 @@ class ThreadedMPCCoordinator:
         room_min: np.ndarray | None = None,
         room_max: np.ndarray | None = None,
         lstm_provider: object | None = None,
+        perception_mailbox: object | None = None,
     ) -> dict[str, np.ndarray]:
         """Solve for drone controls using asynchronous threaded DMPC.
 
@@ -85,12 +88,36 @@ class ThreadedMPCCoordinator:
         Creates fresh ThreadSafeMailbox, ThreadLifecycleManager, and AsyncLocalSolver
         instances for each call (stateless coordinator).
 
+        **Perception mode.** With a ``perception_mailbox``, the mailbox is not bootstrapped with
+        forward-predicted true trajectories but filled from each drone's own camera estimates by
+        :func:`~drone_sim.perception.bridge.feed_trajectory_mailbox` — on *this* thread, before any
+        solver thread is spawned, so no thread can start against a half-written inbox. The
+        timestamps are ``time.monotonic()`` sampled at delivery, the only clock
+        :meth:`~drone_sim.simulation.distributed.async_local_solver.AsyncLocalSolver._filter_stale`
+        understands; a step index there would age out as "hours old" and silently empty every inbox
+        (risk R1). The bridge is called on every ``solve_controls`` for the same reason — those
+        stamps expire after ``stale_threshold_sec``.
+
+        The negotiation itself is switched off: solvers run with ``broadcast_enabled=False`` (a
+        camera observation must not be overwritten by a solved trajectory) and
+        ``allow_empty_inbox=True``. The result is one solve per drone against the perception
+        snapshot; afterwards nothing broadcasts, so nothing notifies, so the trajectories sit still
+        and :meth:`_wait_for_convergence` declares convergence on that stability. Without
+        ``allow_empty_inbox`` a drone whose field of view happens to be empty would never solve at
+        all, its ``traj_prev`` would stay ``None``, and the convergence poll would burn the full
+        ``convergence_timeout_sec`` on every simulation step (risk R6).
+
         :param drones: List of Drone objects to optimize
         :param obstacles: Static obstacles as list of (center, half_extents) tuples
         :param room_min: Room lower bounds (3,) or None
         :param room_max: Room upper bounds (3,) or None
+        :param lstm_provider: Optional provider of per-neighbor LSTM safety radii, or None
+        :param perception_mailbox: Optional :class:`~drone_sim.perception.mailbox.PerceptionMailbox`.
+            ``None`` (the default) keeps the classic true-state negotiation untouched.
         :return: Dict mapping drone_id to first-step control (3,)
         """
+        perception_active = perception_mailbox is not None
+
         # Filter drones to optimize (must have central_cost interface)
         opt_drones = [d for d in drones if has_central_cost(d.controller)]
 
@@ -138,11 +165,25 @@ class ThreadedMPCCoordinator:
                 convergence_threshold=self.convergence_threshold,
                 u_prev=u_prev,
                 lstm_radii=lstm_radii_by_drone.get(drone.drone_id),
+                broadcast_enabled=not perception_active,
+                allow_empty_inbox=perception_active,
             )
             async_solvers[drone.drone_id] = async_solver
 
-        # 5. Bootstrap mailbox with initial trajectories
-        self._bootstrap_mailbox(mailbox, async_solvers)
+        # 5. Fill the mailbox before spawning: true-state bootstrap, or the camera snapshot.
+        #    The mailbox is fresh per call, so there is nothing stale to clear first.
+        if perception_active:
+            feed_trajectory_mailbox(
+                perception=perception_mailbox,
+                trajectory_mailbox=mailbox,
+                receiver_ids=list(async_solvers),
+                horizon=self.horizon,
+                dt=self.dt,
+                timestamp_mode="monotonic",
+                safety_zone_by_id={d.drone_id: d.safety_zone for d in drones},
+            )
+        else:
+            self._bootstrap_mailbox(mailbox, async_solvers)
 
         # 6. Spawn threads (optionally staggered for Gauss-Seidel)
         if self.gauss_seidel:
