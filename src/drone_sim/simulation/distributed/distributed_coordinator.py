@@ -56,8 +56,9 @@ class DistributedMPCCoordinator:
       self._mailbox = TrajectoryMailbox()
       self._admm_state = ADMMState(rho=self.rho, primal_tol=self.primal_tol, dual_tol=self.dual_tol, horizon=self.horizon, )
 
-   def solve_controls(self, *, drones: list[Drone], obstacles: list[tuple[np.ndarray, np.ndarray]], room_min: np.ndarray | None = None,
-                      room_max: np.ndarray | None = None, lstm_provider: object | None = None, ) -> dict[str, np.ndarray]:
+   def solve_controls(self, *, drones: list[Drone], obstacles: list, room_min: np.ndarray | None = None,
+                      room_max: np.ndarray | None = None, lstm_provider: object | None = None,
+                      obstacles_by_id: dict[str, list] | None = None, ) -> dict[str, np.ndarray]:
       """Solve for drone controls using distributed ADMM optimization.
       Matches the CentralMPCGlobalCoordinator interface.
 
@@ -106,6 +107,10 @@ class DistributedMPCCoordinator:
             pos = np.asarray(drone.x, dtype=float)[:3]
             trajectories[drone.drone_id] = np.tile(pos, (self.horizon, 1))
 
+      # Per-drone obstacle override — falls back to the global obstacles list when the caller did not supply a per-drone mapping.
+      # TODO: check if this is still needed.
+      obstacles_by_id = obstacles_by_id or {}
+
       # 3. ADMM iteration loop
       converged = False
       stagnated = False
@@ -152,7 +157,8 @@ class DistributedMPCCoordinator:
                u_prev = self._warm_start_controls(drone_id, iteration, controls)
                u_opt, traj_opt, success, vel_opt = solver.solve(
                   drone=drone, neighbor_trajectories=neighbor_trajectories,
-                  obstacles=obstacles, room_min=room_min, room_max=room_max, u_prev=u_prev,
+                  obstacles=obstacles_by_id.get(drone_id, obstacles),
+                  room_min=room_min, room_max=room_max, u_prev=u_prev,
                   lstm_radii=lstm_radii_by_drone.get(drone_id),
                )
 
@@ -167,7 +173,7 @@ class DistributedMPCCoordinator:
                                        neighbor_graph=self._neighbor_graph)
          else:
             # Jacobi: all drones use stale data, update all at once
-            trajectories, controls, velocities = self._jacobi(drone_order, drone_by_id, local_solvers, iteration, obstacles, room_min, room_max, prev_controls=controls, lstm_radii_by_drone=lstm_radii_by_drone)
+            trajectories, controls, velocities = self._jacobi(drone_order, drone_by_id, local_solvers, iteration, obstacles, room_min, room_max, prev_controls=controls, lstm_radii_by_drone=lstm_radii_by_drone, obstacles_by_id=obstacles_by_id)
 
          # 3c. Stagnation detection — break early if no drone made progress
          stagnated, prev_trajectories, stagnation_count = self._check_stagnation(
@@ -232,9 +238,11 @@ class DistributedMPCCoordinator:
                obstacles: list[tuple[np.ndarray, np.ndarray]] | None = None, room_min: np.ndarray | None = None,
                room_max: np.ndarray | None = None,
                prev_controls: dict[str, np.ndarray] | None = None,
-               lstm_radii_by_drone: dict[str, dict[str, np.ndarray]] | None = None) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]:
+               lstm_radii_by_drone: dict[str, dict[str, np.ndarray]] | None = None,
+               obstacles_by_id: dict[str, list] | None = None) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]:
       """Jacobi update: all drones solve using stale neighbor data, then update all at once."""
       lstm_radii_by_drone = lstm_radii_by_drone or {}
+      obstacles_by_id = obstacles_by_id or {}
       new_trajectories: dict[str, np.ndarray] = {}
       new_controls: dict[str, np.ndarray] = {}
       new_velocities: dict[str, np.ndarray] = {}
@@ -253,7 +261,8 @@ class DistributedMPCCoordinator:
          u_prev = self._warm_start_controls(drone_id, iteration, prev_controls or {})
          u_opt, traj_opt, success, vel_opt = solver.solve(
             drone=drone, neighbor_trajectories=neighbor_trajectories,
-            obstacles=obstacles, room_min=room_min, room_max=room_max, u_prev=u_prev,
+            obstacles=obstacles_by_id.get(drone_id, obstacles),
+            room_min=room_min, room_max=room_max, u_prev=u_prev,
             lstm_radii=lstm_radii_by_drone.get(drone_id),
          )
 

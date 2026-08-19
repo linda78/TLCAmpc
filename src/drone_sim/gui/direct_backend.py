@@ -7,7 +7,7 @@ import numpy as np
 
 from drone_sim.domain.config import ScenarioConfig
 from drone_sim.simulation.simulator import Simulator
-from drone_sim.gui.backend import (SimulationBackend, SimState, DroneState, StepResult, PredictedTrajectory, )
+from drone_sim.gui.backend import (SimulationBackend, SimState, DroneState, StepResult, PredictedTrajectory, IntersectionSphereView, )
 
 
 class DirectBackend(SimulationBackend):
@@ -107,6 +107,26 @@ class DirectBackend(SimulationBackend):
                core_color=core_color,
             ))
 
+      # Intersection spheres — only when the coordinator exposes active_spheres().
+      intersection_spheres: list[IntersectionSphereView] = []
+      if hasattr(sim.coordinator, "active_spheres"):
+         drone_by_id = {d.drone_id: d for d in sim.drones}
+         for pair, record in sim.coordinator.active_spheres().items():
+            priority = record.priority
+            tint_drone = drone_by_id.get(priority) if priority is not None else None
+            if tint_drone is not None:
+               color = tint_drone.color if isinstance(tint_drone.color, str) else list(tint_drone.color)
+            else:
+               # Deadlock-dominance pair — no priority drone, use a neutral grey.
+               color = "tab:gray"
+            intersection_spheres.append(IntersectionSphereView(
+               center=np.asarray(record.sphere.center, dtype=float).reshape(3),
+               radius=float(record.sphere.radius),
+               color=color,
+               priority=priority,
+               pair=tuple(sorted(pair)),
+            ))
+
       return StepResult(drones=drone_states, safety_radii=safety_radii, last_collisions=list(sim.last_collisions), infeasible=bool(sim.infeasible),
             infeasible_reason=sim.infeasible_reason, step_count=sim.step_count, t=float(sim.t), all_reached=all_reached,
-            admm_iteration_count=admm_iteration_count, predictions=predictions)
+            admm_iteration_count=admm_iteration_count, predictions=predictions, intersection_spheres=intersection_spheres)

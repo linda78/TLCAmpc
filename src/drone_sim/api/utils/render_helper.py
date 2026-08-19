@@ -296,3 +296,38 @@ def draw_obstacles(ax: object, obstacles: list[tuple[np.ndarray, np.ndarray]]):
          if label:
             # Invisible scatter point to register the legend entry
             ax.scatter([float(center_arr[0])], [float(center_arr[1])], [float(center_arr[2])], s=1, c="tab:red", alpha=0.0, label=label)
+
+
+def draw_intersection_spheres(ax: object, spheres: list, resolution: int = 24) -> None:
+   """Render active intersection-zone spheres in the priority drone's color.
+
+   Each entry must expose ``center``, ``radius`` and ``color`` attributes
+   (see :class:`drone_sim.gui.backend.IntersectionSphereView`). The sphere
+   is drawn in obstacle style: a semi-transparent filled surface plus a
+   crisper wireframe overlay so it reads as a hard avoidance region, not
+   a drone-safety bubble. The first entry registers a legend entry.
+   """
+   if not spheres:
+      return
+   u = np.linspace(0.0, 2.0 * np.pi, resolution)
+   v = np.linspace(0.0, np.pi, resolution)
+   cos_u = np.cos(u)[:, None]
+   sin_u = np.sin(u)[:, None]
+   sin_v = np.sin(v)[None, :]
+   cos_v = np.cos(v)[None, :]
+   for i, sphere in enumerate(spheres):
+      center = np.asarray(sphere.center, dtype=float).reshape(3)
+      r = float(sphere.radius)
+      color = sphere.color
+      x = center[0] + r * cos_u * sin_v
+      y = center[1] + r * sin_u * sin_v
+      z = center[2] + r * np.ones_like(cos_u) * cos_v
+      # Semi-transparent filled body (matches the obstacle look).
+      ax.plot_surface(x, y, z, color=color, alpha=0.08, linewidth=0, antialiased=False, shade=False)
+      # # Slightly stronger wireframe edges on top.
+      # ax.plot_wireframe(x, y, z, color=color, linewidth=1.2, alpha=0.55, rstride=2, cstride=2)
+      if i == 0:
+         # Invisible scatter point to register the legend entry.
+         marker_color = [color] if isinstance(color, str) else [color]
+         ax.scatter([float(center[0])], [float(center[1])], [float(center[2])],
+                    s=1, c=marker_color, alpha=0.0, label="intersection sphere")

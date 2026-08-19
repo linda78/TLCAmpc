@@ -1,0 +1,80 @@
+{
+  "dt": 0.1,
+  "room": {"min": [-5.0, -5.0, -5.0], "max": [5.0, 5.0, 5.0]},
+  "physics": {"id": "default", "type": "linear_kinematics", "params": {"v_max": 3.0, "u_min": [-3.0, -3.0, -3.0], "u_max": [3.0, 3.0, 3.0]}},
+
+  "comm_radius": null,
+  "controller": {
+    "type": "mpc_agent",
+    "params": {
+      "horizon": 8,
+      "q_pos": [3.0, 3.0, 3.0],
+      "r_u": [0.1, 0.1, 0.1]
+    }
+  },
+
+  "coordinator": {
+    "type": "dmpc_admm_intersection",
+    "params": {
+      "horizon": 8,
+      "rho": 1.0,
+      "max_admm_iter": 50,
+      "primal_tol": 1e-3,
+      "dual_tol": 1e-3,
+      "intersection_enabled": true,
+      "intersection_sphere_radius": 2.0,
+      "intersection_resolution_margin": 1.1
+    }
+  },
+
+  "drones": [
+    {
+      "drone_id": "drone-1",
+      "type": "gated",
+      "start": [-0.438, -3.525, -1.512],
+      "target": [0.438, 3.525, 1.512],
+      "radius": 0.2,
+      "safety_zone": 0.6,
+      "cons_stop": 0.0,
+      "drone_color": "#00FFFF",
+      "physics": "default",
+      "safety_zone_mode": "fixed"
+    },
+    {
+      "drone_id": "drone-2",
+      "type": "gated",
+      "start": [0.066, 3.636, -3.285],
+      "target": [-0.066, -3.636, 3.285],
+      "radius": 0.2,
+      "safety_zone": 0.6,
+      "cons_stop": 0.0,
+      "drone_color": "#800080",
+      "physics": "default",
+      "safety_zone_mode": "fixed"
+    },
+    {
+      "drone_id": "drone-3",
+      "type": "gated",
+      "start": [2.643, 0.339, 3.897],
+      "target": [-2.643, -0.339, -3.897],
+      "radius": 0.2,
+      "safety_zone": 0.6,
+      "cons_stop": 0.0,
+      "drone_color": "#DC143C",
+      "physics": "default",
+      "safety_zone_mode": "fixed"
+    },
+    {
+      "drone_id": "drone-4",
+      "type": "gated",
+      "start": [-3.444, 2.163, 3.165],
+      "target": [3.444, -2.163, -3.165],
+      "radius": 0.2,
+      "safety_zone": 0.6,
+      "cons_stop": 0.0,
+      "drone_color": "#008B8B",
+      "physics": "default",
+      "safety_zone_mode": "fixed"
+    }
+  ]
+}

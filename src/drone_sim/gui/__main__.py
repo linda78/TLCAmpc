@@ -19,7 +19,7 @@ def _configure_logging() -> None:
    ``BOF_LOG_LEVEL`` (prediction-only) — values are standard names like
    DEBUG, INFO, WARNING.
    """
-   root_level = os.environ.get("DRONE_SIM_LOG_LEVEL", "WARNING").upper()
+   root_level = os.environ.get("DRONE_SIM_LOG_LEVEL", "INFO").upper()
    pred_level = os.environ.get("BOF_LOG_LEVEL", "INFO").upper()
    logging.basicConfig(
       level=getattr(logging, root_level, logging.WARNING),

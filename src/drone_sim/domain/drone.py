@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
-from typing import TypeAlias
+from typing import Sequence, TypeAlias
 
 import numpy as np
 
 from drone_sim.controllers.base import Controller
 from drone_sim.physics.base import PhysicsModel
+
+_log = logging.getLogger(__name__)
 
 Color: TypeAlias = str | tuple[float, float, float]
 
@@ -14,6 +17,14 @@ Color: TypeAlias = str | tuple[float, float, float]
 def has_central_cost(ctrl: object) -> bool:
    """Check if controller implements the central_cost interface."""
    return all(hasattr(ctrl, name) for name in ("central_cost", "central_initial_guess", "horizon"))
+
+
+def has_waiters(drones: Sequence["Drone"], drone_id: str) -> bool:
+   """Whether any GatedDrone is currently waiting on ``drone_id``."""
+   for d in drones:
+      if isinstance(d, GatedDrone) and d.waiting_for == drone_id:
+         return True
+   return False
 
 
 @dataclass
@@ -120,3 +131,86 @@ class Drone:
 
    def velocity(self) -> np.ndarray:
       return self.x[3:]
+
+
+@dataclass
+class GatedDrone(Drone):
+   """Drone with a wait-state for the intersection-zone coordinator.
+
+   States (``wait_state``):
+
+   - ``"free"`` — original controller, normal flight.
+   - ``"stopping"`` — controller is :data:`BRAKING_CONTROLLER`. Stays in
+     DMPC's ``opt_drones``; collision constraints remain active.
+   - ``"waiting"`` — controller is :data:`WAIT_CONTROLLER`. Falls out of
+     ``opt_drones`` (no ``central_cost``).
+
+   :param waiting_for: drone_id this drone is waiting on, or ``None``.
+   """
+
+   waiting_for: str | None = None
+   wait_state: str = "free"
+   _original_controller: Controller | None = field(default=None, init=False, repr=False)
+
+   @property
+   def is_waiting(self) -> bool:
+      return self.wait_state != "free"
+
+   @property
+   def is_stopping(self) -> bool:
+      return self.wait_state == "stopping"
+
+   @property
+   def is_parked(self) -> bool:
+      return self.wait_state == "waiting"
+
+   def start_waiting(self, target_id: str) -> None:
+      """Enter STOPPING — swap to :data:`BRAKING_CONTROLLER`.
+
+      Idempotent: no-op if already in a non-free state (first wait wins).
+      """
+      if self.is_waiting:
+         _log.debug(
+            "GatedDrone.start_waiting: %s already in state=%s on %s, requested target=%s — no-op",
+            self.drone_id, self.wait_state, self.waiting_for, target_id,
+         )
+         return
+      from drone_sim.controllers.braking import BRAKING_CONTROLLER
+
+      self._original_controller = self.controller
+      self.controller = BRAKING_CONTROLLER
+      self.waiting_for = target_id
+      self.wait_state = "stopping"
+      _log.info(
+         "GatedDrone.start_waiting: %s -> STOPPING on %s",
+         self.drone_id, target_id,
+      )
+
+   def transition_to_parked(self) -> None:
+      """Move STOPPING → WAITING — swap to :data:`WAIT_CONTROLLER`."""
+      if self.wait_state != "stopping":
+         return
+      from drone_sim.controllers.wait import WAIT_CONTROLLER
+
+      self.controller = WAIT_CONTROLLER
+      self.wait_state = "waiting"
+      _log.info(
+         "GatedDrone.transition_to_parked: %s STOPPING -> WAITING",
+         self.drone_id,
+      )
+
+   def stop_waiting(self) -> None:
+      """Release this drone — restore the original controller."""
+      if not self.is_waiting:
+         return
+      released_target = self.waiting_for
+      released_state = self.wait_state
+      if self._original_controller is not None:
+         self.controller = self._original_controller
+      self._original_controller = None
+      self.waiting_for = None
+      self.wait_state = "free"
+      _log.info(
+         "GatedDrone.stop_waiting: %s released from %s (was waiting on %s)",
+         self.drone_id, released_state, released_target,
+      )

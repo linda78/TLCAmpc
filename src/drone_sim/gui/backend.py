@@ -38,6 +38,21 @@ class PredictedTrajectory:
 
 
 @dataclass
+class IntersectionSphereView:
+    """One active intersection sphere, surfaced for rendering.
+
+    ``priority`` is the drone_id whose color tints the sphere — the TTC
+    winner that is allowed to ignore it. ``pair`` is sorted for stable
+    legend / hover output.
+    """
+    center: np.ndarray
+    radius: float
+    color: str | list[float]
+    priority: str | None
+    pair: tuple[str, str]
+
+
+@dataclass
 class StepResult:
     drones: list[DroneState]
     safety_radii: list[float]         # current effective safety radius per drone
@@ -49,6 +64,7 @@ class StepResult:
     all_reached: bool = False              # True when all drones are at their destination
     admm_iteration_count: int | None = None  # None for non-ADMM coordinators
     predictions: list[PredictedTrajectory] = field(default_factory=list)
+    intersection_spheres: list[IntersectionSphereView] = field(default_factory=list)
 
 
 @dataclass
