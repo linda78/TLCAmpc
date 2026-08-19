@@ -56,7 +56,7 @@ def _make_drone(
         controller=_StubController(),
         physics=LinearKinematicsPhysics(dt=0.1, v_max=v_max),
         x=np.asarray(x, dtype=float).reshape(6),
-        route=Route(waypoints=[], target=np.asarray(target, dtype=float).reshape(3)),
+        route=Route(start=np.asarray(x, dtype=float).reshape(6)[:3], waypoints=[], target=np.asarray(target, dtype=float).reshape(3)),
         alpha=alpha,
         safety_zone_mode=safety_zone_mode,
     )

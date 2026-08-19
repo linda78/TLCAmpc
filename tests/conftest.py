@@ -107,6 +107,7 @@ def sample_coordinator(sample_dt: float) -> CentralMPCGlobalCoordinator:
 def sample_route() -> Route:
    """Return a sample Route with waypoints and target."""
    return Route(
+      start=np.array([0.0, 0.0, 0.0]),  # matches sample_drone.x[:3]
       waypoints=[np.array([1.0, 1.0, 1.0]), np.array([2.0, 2.0, 2.0])],
       target=np.array([3.0, 3.0, 3.0]),
       waypoint_radius=0.5
@@ -117,6 +118,7 @@ def sample_route() -> Route:
 def sample_route_no_waypoints() -> Route:
    """Return a Route with no waypoints (direct to target)."""
    return Route(
+      start=np.array([0.0, 0.0, 0.0]),  # matches sample_drone.x[:3]
       waypoints=[],
       target=np.array([5.0, 5.0, 5.0]),
       waypoint_radius=0.5

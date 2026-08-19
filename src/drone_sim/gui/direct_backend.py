@@ -7,8 +7,8 @@ import numpy as np
 
 from drone_sim.domain.config import ScenarioConfig
 from drone_sim.simulation.simulator import Simulator
-from drone_sim.gui.backend import (SimulationBackend, SimState, DroneState, StepResult, PredictedTrajectory, )
-
+from drone_sim.gui.backend import (RouteState, SimulationBackend, SimState, DroneState, StepResult, PredictedTrajectory)
+from drone_sim.domain.utils.helper import start_to_dest_ref_path
 
 class DirectBackend(SimulationBackend):
    """Wraps Simulator with no serialization overhead. No Qt dependency."""
@@ -33,6 +33,7 @@ class DirectBackend(SimulationBackend):
    def step(self) -> StepResult:
       if self._sim is None:
          raise RuntimeError("Call load_config() before step()")
+      # do not check for simulation end here, it will freeze functions as step_count and last_collisions. So run in gui "until_end" instead
       self._sim.step()
       return self._make_step_result()
 
@@ -55,7 +56,7 @@ class DirectBackend(SimulationBackend):
       sim = self._sim
       coordinator_type = (type(sim.coordinator).__name__ if sim.coordinator is not None else "none")
       return SimState(drone_count=len(sim.drones), obstacle_count=len(sim.obstacles), obstacles=sim.obstacles, coordinator_type=coordinator_type,
-                      dt=sim.dt, step_count=sim.step_count, room_min=sim.room_min, room_max=sim.room_max, config_path=str(self._config_path) if self._config_path is not None else None, )
+                      dt=sim.dt, step_count=sim.step_count, room_min=sim.room_min, room_max=sim.room_max, config_path=str(self._config_path) if self._config_path is not None else None)
 
    def _make_step_result(self) -> StepResult:
       sim = self._sim
@@ -69,7 +70,8 @@ class DirectBackend(SimulationBackend):
          drone_states.append(DroneState(drone_id=d.drone_id, position=d.position(), velocity=vel, radius=d.radius, safety_zone=float(d.safety_zone),
                adaptive_safety_radius=r if d.is_adaptive else None, max_adaptive_safety_radius=d.compute_max_adaptive_radius() if d.is_adaptive else None,
                color=d.color if isinstance(d.color, str) else list(d.color), safety_color=(d.safety_color if isinstance(d.safety_color, str) else list(d.safety_color)),
-               trace_color=(d.trace_color if isinstance(d.trace_color, str) else list(d.trace_color))))
+               trace_color=(d.trace_color if isinstance(d.trace_color, str) else list(d.trace_color)),
+               route=RouteState.from_route(d.route, start_to_dest_ref_path=start_to_dest_ref_path(d.route.start, d.route.target, d, sim.dt))))
 
       # Destination check — helper takes Drone objects, not DroneState (BACK-01: no sim access in GUI)
       from drone_sim.domain.utils.helper import all_drones_reached_destination

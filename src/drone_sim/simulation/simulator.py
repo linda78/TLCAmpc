@@ -104,7 +104,7 @@ class Simulator:
          # Resolve per-drone physics: lookup by drone's physics ID, fall back to first/global
          drone_physics = physics_by_id.get(drone_cfg.physics, physics)
 
-         route = Route(waypoints=[np.asarray(w, dtype=float) for w in drone_cfg.waypoints], target=np.asarray(drone_cfg.target, dtype=float))
+         route = Route(start=np.asarray(drone_cfg.start, dtype=float), waypoints=[np.asarray(w, dtype=float) for w in drone_cfg.waypoints], target=np.asarray(drone_cfg.target, dtype=float))
          drone_color = _normalize_color(drone_cfg.drone_color)
          safety_color = _normalize_color(drone_cfg.safety_color or drone_cfg.drone_color)
          trace_color = _normalize_color(drone_cfg.trace_color or drone_cfg.drone_color)

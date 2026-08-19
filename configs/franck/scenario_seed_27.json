@@ -1,0 +1,113 @@
+{
+  "dt": 0.1,
+  "room": {
+    "min": [-3.0, -3.0, -3.0],
+    "max": [3.0, 3.0, 3.0]
+  },
+  "physics": [{
+    "id": "franck",
+    "type": "linear_kinematics",
+    "params": {
+      "v_max": 1.0,
+      "u_min": [-2.0, -2.0, -2.0],
+      "u_max": [2.0, 2.0, 2.0]
+    }
+  }],
+  "controller": {
+    "type": "mpc_agent",
+    "params": {
+      "horizon": 10,
+      "q_pos": [2.0, 2.0, 2.0],
+      "q_vel": [0.1, 0.1, 0.1],
+      "r_u": [0.5, 0.5, 0.5]
+    }
+  },
+  "coordinator": {
+    "type": "mpc_central",
+    "params": {
+      "horizon": 10,
+      "room_wall_tolerance": 0.5
+    }
+  },
+  "drones": [{
+    "drone_id": "drone-1",
+    "physics": "franck",
+    "start": [-0.29711435792441687, 1.2583349619782105, 0.9415891607987183],
+    "target": [0.29711435792441687, -1.2583349619782105, -0.9415891607987183],
+    "radius": 0.5,
+    "safety_zone": 1.0,
+    "cons_stop": 0.0,
+    "alpha": null,
+    "drone_color": "#ff0000"
+  }, {
+    "drone_id": "drone-2",
+    "physics": "franck",
+    "start": [1.472012799518943, -0.4664769085095193, 1.9178265285780824],
+    "target": [-1.472012799518943, 0.4664769085095193, -1.9178265285780824],
+    "radius": 0.5,
+    "safety_zone": 1.0,
+    "cons_stop": 0.0,
+    "alpha": null,
+    "drone_color": "#ff7f00"
+  }, {
+    "drone_id": "drone-3",
+    "physics": "franck",
+    "start": [0.9970488549740755, 1.4805788802210187, -1.2529766261143478],
+    "target": [-0.9970488549740755, -1.4805788802210187, 1.2529766261143478],
+    "radius": 0.5,
+    "safety_zone": 1.0,
+    "cons_stop": 0.0,
+    "alpha": null,
+    "drone_color": "#d4ff00"
+  }, {
+    "drone_id": "drone-4",
+    "physics": "franck",
+    "start": [-1.3957589218076425, -1.3202292038487609, -1.6753236282006174],
+    "target": [1.3957589218076425, 1.3202292038487609, 1.6753236282006174],
+    "radius": 0.5,
+    "safety_zone": 1.0,
+    "cons_stop": 0.0,
+    "alpha": null,
+    "drone_color": "#00ff4f"
+  }, {
+    "drone_id": "drone-5",
+    "physics": "franck",
+    "start": [-1.7174348164586943, 0.8042846915661519, -1.2760804835985242],
+    "target": [1.7174348164586943, -0.8042846915661519, 1.2760804835985242],
+    "radius": 0.5,
+    "safety_zone": 1.0,
+    "cons_stop": 0.0,
+    "alpha": null,
+    "drone_color": "#00ffff"
+  }, {
+    "drone_id": "drone-6",
+    "physics": "franck",
+    "start": [-1.6303123444888068, -1.9454819934759868, 1.3477204338715385],
+    "target": [1.6303123444888068, 1.9454819934759868, -1.3477204338715385],
+    "radius": 0.5,
+    "safety_zone": 1.0,
+    "cons_stop": 0.0,
+    "alpha": null,
+    "drone_color": "#004fff"
+  }, {
+    "drone_id": "drone-7",
+    "physics": "franck",
+    "start": [-0.1578679318944607, -1.1148476609132483, 0.05748006721104648],
+    "target": [0.1578679318944607, 1.1148476609132483, -0.05748006721104648],
+    "radius": 0.5,
+    "safety_zone": 1.0,
+    "cons_stop": 0.0,
+    "alpha": null,
+    "drone_color": "#7f00ff"
+  }, {
+    "drone_id": "drone-8",
+    "physics": "franck",
+    "start": [1.988351142309185, -1.6227221792860664, -1.8852068688164105],
+    "target": [-1.988351142309185, 1.6227221792860664, 1.8852068688164105],
+    "radius": 0.5,
+    "safety_zone": 1.0,
+    "cons_stop": 0.0,
+    "alpha": null,
+    "drone_color": "#ff00d4"
+  }]
+}

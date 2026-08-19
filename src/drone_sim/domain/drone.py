@@ -18,6 +18,7 @@ def has_central_cost(ctrl: object) -> bool:
 
 @dataclass
 class Route:
+   start: np.ndarray
    waypoints: list[np.ndarray]
    target: np.ndarray
    waypoint_radius: float = 0.5

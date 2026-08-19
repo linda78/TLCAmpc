@@ -22,7 +22,6 @@ from drone_sim.simulation.distributed.distributed_coordinator import Distributed
 from tools.utility import DronePlacementError
 from tools.utility.scenario_creator import create_scenario
 from drone_sim.domain.utils.helper import all_drones_reached_destination
-import logging
 
 
 def load_parametrized_json(path: str | Path, params: dict[str, str] | None = None) -> dict[str, Any]:
@@ -73,8 +72,12 @@ def _create_scenario(config_path: str | Path | None, params: dict[str, str] | No
 def live_view_simulator(sim: Simulator, *, steps: int, step_n: int, sleep_s: float, trace_len: int,
                         width: int, height: int, dpi: int, elev: float, azim: float,
                         record_dir: str | Path | None, gif_path: str | Path | None, gif_fps: float,
-                        obj_name: str | None = None, show_live: bool = True) -> None:
+                        obj_name: str | None = None, show_live: bool = True, do_francks_plot: bool = False) -> None:
    """Step ``sim`` and render frames; optionally show a live matplotlib window and/or save PNGs/GIF."""
+   if do_francks_plot:
+      # lazy import for those without franck tools folder
+      from tools.franck.config_plot import configure_plt
+      configure_plt()
    record_path = Path(record_dir) if record_dir is not None else None
    if record_path is not None:
       record_path.mkdir(parents=True, exist_ok=True)
@@ -129,13 +132,14 @@ def live_view_simulator(sim: Simulator, *, steps: int, step_n: int, sleep_s: flo
       admm_converged = sim.coordinator.get_last_converged() if is_distributed else None
 
       obj_path = str(Path(__file__).resolve().parent.parent / "src" / "drone_sim" / "resources" / "assets" / obj_name) if obj_name else None
-      png_bytes = render_png(room_min=sim.room_min, room_max=sim.room_max, drones=sim.drones,
+      png_bytes = render_png(room_min=sim.room_min, room_max=sim.room_max, drones=sim.drones, 
                              drone_traces=traces, obstacles=sim.obstacles,
                              step_count=sim.step_count, compute_time_s=sim.compute_time_s,
                              neighbor_links=neighbor_links, admm_iteration_count=admm_iteration_count, admm_converged=admm_converged,
                              safety_alphas=safety_alphas,
                              width=width, height=height, dpi=dpi, elev=elev, azim=azim,
-                             obj_path=obj_path, obj_scale=0.5, draw_sphere_if_obj=False
+                             obj_path=obj_path, obj_scale=0.5, draw_sphere_if_obj=False,
+                             draw_collision_points=do_francks_plot,draw_reference_paths=do_francks_plot,draw_drone_markers=do_francks_plot
                              )
 
       if show_live:
@@ -162,7 +166,6 @@ def live_view_simulator(sim: Simulator, *, steps: int, step_n: int, sleep_s: flo
          time.sleep(sleep_s)
 
       all_reached = all_drones_reached_destination(sim.drones)
-      print(f"All drones reached: {all_reached}")
 
    if show_live:
       plt.ioff()
@@ -219,6 +222,9 @@ def main(argv: list[str] | None = None) -> None:
    p.add_argument("--dpi", type=int, default=120)
    p.add_argument("--elev", type=float, default=20.0)
    p.add_argument("--azim", type=float, default=-60.0)
+   # @Franck: start with --height=900 and --do-francks-plot to get all your changes, changing default value breaks other scenarios
+   # we can find a better name for the combination using francks latex config + markers + reference paths + collision points
+   p.add_argument("--do-francks-plot", action="store_true", default=False)
 
    p.add_argument("--obj-name", type=str)
 

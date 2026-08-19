@@ -8,6 +8,62 @@ Created on Tue Feb 10 11:02:19 2026
 
 import numpy as np
 
+#%% GENERATE UNIFORM POINTS
+def drone_jam(cube_side, drone_radius, v_max, u_max):
+    """
+    Determines the number of drones with dynamics required to cause a deadlock/jam within the bounded airspace
+    Corresponds to N_jam in mathematical formulations
+    
+    Only difference with N_cov is that it considers an extra distance, breaking_dist
+        as a distance allowed for the drone to slow down when there is a collision ahead
+    
+    Args:
+        cube_side (float): Side of bounded cubic airspace
+        sphere_radius (float): Radius of spheres to be packed
+        v_max (float): Maximum permissible drone velocity
+        u_max (float): Maximum permissible drone acceleration 
+        
+    Returns:
+        positions (list): List of initial drone positions that will create a deadlock
+    """    
+
+    
+    # --- Parameters from the scenario ---
+    breaking_dist = (v_max ** 2) / u_max # margin for drone to slow down when obstacle is detected
+    drone_sep = (2 * drone_radius) + breaking_dist # rho in mathematical calculations
+    packing_density = (25 * np.pi) / (24 * np.sqrt(5))  # Sphere Covering: Theoretical BCC density ≈ 1.463503
+    tiling_step = packing_density * drone_sep # actual spacing between drones
+    
+
+    # --- Obtain theorical number of drones that can fit in the cube in farthest static packing ---
+    cube_volume = cube_side ** 3
+    sphere_volume = (4/3) * np.pi * drone_sep**3 # for N_cov, r = 2*radius
+    theoretical_max = int((cube_volume * packing_density) / sphere_volume)
+
+    
+    # --- Calculation of the grid coverage ---
+    half_side = cube_side/2
+    min_bound = -half_side + drone_radius
+    max_bound = half_side - drone_radius
+    
+    
+    # --- Center points spaced using tiling_step ---
+    x_centers = np.arange(min_bound, max_bound, tiling_step)
+    y_centers = np.arange(min_bound, max_bound , tiling_step)
+    z_centers = np.arange(min_bound, max_bound , tiling_step)
+    
+    
+    # --- Keep only points within cube boundaries ---
+    valid_x = x_centers[(x_centers >= (-half_side)) & (x_centers <= (half_side))]
+    valid_y = y_centers[(y_centers >= (-half_side)) & (y_centers <= (half_side))]
+    valid_z = z_centers[(z_centers >= (-half_side)) & (z_centers <= (half_side))]
+    
+    
+    # --- 3D lattice of drone centers ---
+    X, Y, Z = np.meshgrid(valid_x, valid_y, valid_z)
+    positions = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
+
+    return positions
 
 # %% GENERATE RANDOM POINTS WITHIN THE AIRSPACE
 def generate_random_points(drone_radius, cube_side, N: int, d_r, seed, max_attempts: int = 1000) -> np.ndarray:

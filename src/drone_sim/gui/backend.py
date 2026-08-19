@@ -5,6 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
+from drone_sim.domain.drone import Route
+
 
 @dataclass
 class DroneState:
@@ -18,7 +20,7 @@ class DroneState:
     color: str | list[float]
     safety_color: str | list[float]
     trace_color: str | list[float]
-
+    route: RouteState
 
 @dataclass
 class PredictedTrajectory:
@@ -36,6 +38,23 @@ class PredictedTrajectory:
     inner_radius: float              # drone.radius — the body, not the safety zone
     core_color: str | list[float]    # neighbor's drone color (inner tube tint)
 
+
+@dataclass
+class RouteState:
+    """GUI-side snapshot of a domain `Route`. Decouples the GUI from the live
+    simulator state — mutating any field here MUST NOT affect the simulator."""
+
+    start: np.ndarray
+    waypoints: list[np.ndarray]
+    target: np.ndarray
+    start_to_dest_ref_path: np.ndarray  # precomputed reference polyline; required.
+    waypoint_radius: float = 0.5
+    idx: int = 0
+
+    @classmethod
+    def from_route(cls, route: Route, *, start_to_dest_ref_path: np.ndarray) -> RouteState:
+        return cls(start=np.array(route.start, copy=True), waypoints=[np.array(w, copy=True) for w in route.waypoints],
+              target=np.array(route.target, copy=True), waypoint_radius=route.waypoint_radius, idx=route.idx, start_to_dest_ref_path=start_to_dest_ref_path, )
 
 @dataclass
 class StepResult:
