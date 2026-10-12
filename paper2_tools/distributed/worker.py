@@ -17,7 +17,9 @@ import logging
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 
-from paper2_tools.distributed.config import HORIZON, DT, ALPHA, MAX_STEPS, TRACE_LEN, TIMEOUT_MS
+import numpy as np
+
+from paper2_tools.distributed.config import HORIZON, DT, ALPHA, MAX_STEPS, TRACE_LEN, TIMEOUT_MS, placement_seed
 from paper2_tools.distributed.db import claim_task, insert_metrics, mark_done, mark_error, count_by_status
 
 logger = logging.getLogger(__name__)
@@ -36,13 +38,19 @@ def _run_one_task(v_max: float, u_max: float, room_size: float, alpha: float,
         return False
 
     task_id = task["id"]
+    run_index = task["run_index"]
     n_drones = task["n_drones"]
     coordinator = task["coordinator"]
     controller = task["controller"]
+    seed = placement_seed(run_index, n_drones)
 
-    logger.info("Claimed task %d: n_drones=%d, %s/%s", task_id, n_drones, coordinator, controller)
+    logger.info("Claimed task %d: run=%d, n_drones=%d, %s/%s, seed=%d",
+                task_id, run_index, n_drones, coordinator, controller, seed)
 
     try:
+        # Same seed for all coordinator/controller combinations of this (run, N):
+        # create_scenario draws the start/target positions from np.random.
+        np.random.seed(seed)
         cfg = create_scenario(
             horizon=HORIZON, dt=DT,
             controller_type=controller, coordinator_type=coordinator,

@@ -10,7 +10,7 @@ class QueueStatus(StrEnum):
    DONE = "done"
    ERROR = "error"
 
-_SCENARIO_QUEUE_FIELDNAMES = ['id', 'status', 'n_drones', 'coordinator', 'controller']
+_SCENARIO_QUEUE_FIELDNAMES = ['id', 'status', 'run', 'n_drones', 'coordinator', 'controller']
 
 _COORDINATORS = ['mpc_central', 'dmpc_admm', 'dmpc_threaded']
 _CONTROLLERS = ['mpc_agent', 'mpc_agent_adaptive']
@@ -54,11 +54,11 @@ def create_queue(queue_path: Path, runs: range, drones: range, coordinators: lis
       index = 0
       coordinators = coordinators if coordinators is not None else _COORDINATORS
       controllers = controllers if controllers is not None else _CONTROLLERS
-      for _ in runs:
+      for run in runs:
          for n in drones:
             for coord in coordinators:
                for controller in controllers:
-                  rows.append({'id': index, 'status': QueueStatus.TO_BE_DONE, 'n_drones': n, 'coordinator': coord, 'controller': controller})
+                  rows.append({'id': index, 'status': QueueStatus.TO_BE_DONE, 'run': run, 'n_drones': n, 'coordinator': coord, 'controller': controller})
                   index += 1
 
       with queue_path.open('w', newline='', encoding='utf-8') as f:
