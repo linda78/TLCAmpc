@@ -27,6 +27,7 @@ from paper2_tools.plot_scenario_1_2 import main as plot_scenario_1_2
 from tools.utility.scenario_csv_runner import create_queue, claim_row, update_row, count_remaining_scenarios
 from tools.utility.scenario_creator import create_scenario
 from tools.utility.ram_usage import wait_for_ram
+from paper2_tools.distributed.config import placement_seed
 
 # adaptive -> mpc_agent_adaptive
 # static- > mpc_agent
@@ -99,9 +100,12 @@ def _run_worker(cfg_queue_csv_path: Path, lock_path: Path, result_dir: Path, v_m
    queue_row = claim_row(cfg_queue_csv_path, lock_path)
    queue_id = queue_row['id']
    try:
+      run_index = int(queue_row['run'])
       n_drones = int(queue_row['n_drones'])
       coordinator = queue_row['coordinator']
       controller = queue_row['controller']
+      # Same seed for all coordinator/controller combinations of this (run, N), see paper2_tools/distributed/worker.py
+      np.random.seed(placement_seed(run_index, n_drones))
       cfg = create_scenario(horizon=_HORIZON, dt=_DT, controller_type=controller, coordinator_type=coordinator, physics_u=u_max, physics_v=v_max,
                             room_size=room_size, n_drones=n_drones, alpha=alpha if controller == 'mpc_agent_adaptive' else None, drones_radius=r_min,
                             safety_zone=adaptive_safety_zone if controller == 'mpc_agent_adaptive' else static_safety_zone)
@@ -173,6 +177,9 @@ def run_scenario_1_2(result_path: str, n_threads: int, v_max: float, u_max: floa
    lock_path = cfg_queue_csv_path.with_suffix('.csv.lock')
 
    create_queue(cfg_queue_csv_path, range(n_runs), range(2, n_crit + 2), COORDINATORS, CONTROLLERS)
+   with cfg_queue_csv_path.open('r', newline='', encoding='utf-8') as f:
+      if 'run' not in (csv.DictReader(f).fieldnames or []):
+         raise RuntimeError(f'{cfg_queue_csv_path} has no "run" column (old queue format). Delete it and start again.')
    
    n_workers = n_threads if n_threads > 0 else multiprocessing.cpu_count()
    print(f'Starting {n_workers} worker processes...')
