@@ -13,7 +13,7 @@ variable "worker_count" {
 variable "worker_server_type" {
   description = "Hetzner server type for workers"
   type        = string
-  default     = "cpx62"
+  default     = "cpx42"
 }
 
 variable "db_server_type" {
