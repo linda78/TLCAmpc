@@ -1,0 +1,5 @@
+arm,mode,sequencing,zone,scenario,n_drones,seed,horizon,outcome,completed,reached,energy,makespan_steps,makespan_s,min_margin,violation_steps,min_body_margin,collision_steps,peak_spheres,peak_waiting,n_parked,steps,wall_time_s
+A5,distributed,0,fixed,S-C8,8,0,8,COMPLETED,1,8,466.0724,52,5.20,-0.0000,4,0.8000,0,0,0,0,52,55.31
+A5,distributed,0,fixed,S-C8,8,1,8,COMPLETED,1,8,439.6100,54,5.40,-0.0000,8,0.8000,0,0,0,0,54,64.77
+A7,distributed,1,fixed,S-C8,8,0,8,COMPLETED,1,8,494.1914,108,10.80,-0.0000,1,0.8000,0,14,7,7,108,275.45
+A7,distributed,1,fixed,S-C8,8,1,8,COMPLETED,1,8,493.4792,94,9.40,-0.0000,2,0.8000,0,13,7,7,94,243.14
