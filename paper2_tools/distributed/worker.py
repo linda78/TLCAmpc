@@ -6,7 +6,8 @@ instead of CSV file-locking.
 Usage:
     DRONESIM_DATABASE_URL="..." python -m paper2_tools.distributed.worker \
         --v-max 2.5 --u-max 3.0 --room-size 8.0 \
-        --static-safety-zone 1.52 --adaptive-safety-zone 1.0 --r-min 0.4
+        --static-safety-zone 1.52 --adaptive-safety-zone 1.0 --r-min 0.4 \
+        --deadlock-steps 100 --deadlock-min-movement 0.01
 """
 
 from __future__ import annotations
@@ -19,14 +20,16 @@ from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 
 import numpy as np
 
-from paper2_tools.distributed.config import HORIZON, DT, ALPHA, MAX_STEPS, TRACE_LEN, TIMEOUT_MS, placement_seed
+from paper2_tools.distributed.config import (HORIZON, DT, ALPHA, MAX_STEPS, TRACE_LEN, TIMEOUT_MS, DEADLOCK_STEPS, DEADLOCK_MIN_MOVEMENT,
+                                             placement_seed)
 from paper2_tools.distributed.db import claim_task, insert_metrics, mark_done, mark_error, count_by_status
 
 logger = logging.getLogger(__name__)
 
 
 def _run_one_task(v_max: float, u_max: float, room_size: float, alpha: float,
-                  static_safety_zone: float, adaptive_safety_zone: float, r_min: float) -> bool:
+                  static_safety_zone: float, adaptive_safety_zone: float, r_min: float,
+                  deadlock_steps: int | None, deadlock_min_movement: float) -> bool:
     """Claim and execute a single task. Returns True if a task was processed, False if queue empty."""
     # Import simulation code inside the worker process to avoid PySide6 issues in main process
     from tools.utility import DronePlacementError, Status
@@ -63,7 +66,8 @@ def _run_one_task(v_max: float, u_max: float, room_size: float, alpha: float,
 
         status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, _frames = \
             run_single_scenario(scenario=cfg, max_steps=MAX_STEPS, trace_len=TRACE_LEN,
-                                timeout=TIMEOUT_MS, store_gif=False)
+                                timeout=TIMEOUT_MS, store_gif=False,
+                                deadlock_steps=deadlock_steps, deadlock_min_movement=deadlock_min_movement)
 
         _fieldnames, row = print_results_prep(
             all_pair_dists=all_pair_dists, jerk_3d_value=jerk_3d_value,
@@ -93,9 +97,11 @@ def _run_one_task(v_max: float, u_max: float, room_size: float, alpha: float,
 
 
 def _worker_loop(v_max: float, u_max: float, room_size: float, alpha: float,
-                 static_safety_zone: float, adaptive_safety_zone: float, r_min: float) -> None:
+                 static_safety_zone: float, adaptive_safety_zone: float, r_min: float,
+                 deadlock_steps: int | None, deadlock_min_movement: float) -> None:
     """Keep claiming tasks until the queue is empty."""
-    while _run_one_task(v_max, u_max, room_size, alpha, static_safety_zone, adaptive_safety_zone, r_min):
+    while _run_one_task(v_max, u_max, room_size, alpha, static_safety_zone, adaptive_safety_zone, r_min,
+                        deadlock_steps, deadlock_min_movement):
         pass
 
 
@@ -108,6 +114,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--static-safety-zone", type=float, default=1.52)
     parser.add_argument("--adaptive-safety-zone", type=float, default=1.0)
     parser.add_argument("--r-min", type=float, default=0.4)
+    parser.add_argument("--deadlock-steps", type=int, default=DEADLOCK_STEPS or 0,
+                        help="Consecutive steps in which no drone moves before the run counts as a deadlock (0 disables)")
+    parser.add_argument("--deadlock-min-movement", type=float, default=DEADLOCK_MIN_MOVEMENT,
+                        help="Movement per step (metres) below which a drone counts as not moving")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args(argv)
 
@@ -120,8 +130,15 @@ def main(argv: list[str] | None = None) -> None:
     n_workers = args.n_workers if args.n_workers > 0 else multiprocessing.cpu_count()
     logger.info("Starting %d worker processes", n_workers)
 
+    deadlock_steps = args.deadlock_steps if args.deadlock_steps > 0 else None
+    if deadlock_steps is None:
+        logger.info("Deadlock check disabled")
+    else:
+        logger.info("Deadlock check: %d steps with movement < %g m per step", deadlock_steps, args.deadlock_min_movement)
+
     worker_args = (args.v_max, args.u_max, args.room_size, ALPHA,
-                   args.static_safety_zone, args.adaptive_safety_zone, args.r_min)
+                   args.static_safety_zone, args.adaptive_safety_zone, args.r_min,
+                   deadlock_steps, args.deadlock_min_movement)
 
     with ProcessPoolExecutor(max_workers=n_workers) as executor:
         futures = set()

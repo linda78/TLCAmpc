@@ -16,7 +16,7 @@ from drone_sim.domain.config import ScenarioConfig
 from drone_sim.simulation.simulator import Simulator
 from drone_sim.domain.utils.helper import all_drones_reached_destination
 from tools.utility.constants import AZIM, DPI, ELEV, GIF_HEIGHT, GIF_WIDTH
-from tools.utility.helper import pairwise_distances, piecewise_linear_loss_3d
+from tools.utility.helper import DeadlockDetector, pairwise_distances, piecewise_linear_loss_3d
 from tools.utility.printer import print_gif, print_results_prep, Status
 from tools.utility.scenario_creator import create_scenario
 
@@ -70,7 +70,8 @@ tuple[int, int, str]:
       return (num_drones, horizon, f"exception: {e}")
 
 
-def run_single_scenario(scenario: ScenarioConfig, max_steps: int, trace_len: int, timeout: float | None = None, store_gif: bool = True) -> tuple[
+def run_single_scenario(scenario: ScenarioConfig, max_steps: int, trace_len: int, timeout: float | None = None, store_gif: bool = True,
+                        deadlock_steps: int | None = None, deadlock_min_movement: float = 0.0) -> tuple[
    Status, float, float, list[float], list[float], list[float], list[Image.Image]]:
    """
    Run one (N, H) pair using direct simulator execution and returns all relevant information to create csv and gif
@@ -79,6 +80,9 @@ def run_single_scenario(scenario: ScenarioConfig, max_steps: int, trace_len: int
    :param max_steps: Maximum number of steps to run.
    :param trace_len: Number of previous positions to store per drone for 3D jerk metric.
    :param timeout: Optional timeout in seconds. If exceeded, returns with Status.TIMEOUT.
+   :param deadlock_steps: Optional number of consecutive steps in which every drone moved less than ``deadlock_min_movement``
+                          before the run counts as a deadlock and returns with Status.DEADLOCK. None disables the check.
+   :param deadlock_min_movement: Movement (metres per step) below which a drone counts as not moving for the deadlock check.
    :return: status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, frames
    """
    status = Status.RUNNING
@@ -143,11 +147,16 @@ def run_single_scenario(scenario: ScenarioConfig, max_steps: int, trace_len: int
          all_pair_dists.extend(dists.tolist())
          step_mean_pair_dists.append(float(dists.mean()))
 
+   deadlock_detector = DeadlockDetector(window=deadlock_steps, min_movement=deadlock_min_movement)
+
    try:
       sim = Simulator.from_config(scenario)
    except Exception as e:
       print(f"  Error creating simulator: {e}")
       return Status.ERROR, time.perf_counter() - t0, _compute_jerk_3d_value(), step_durations, step_mean_pair_dists, all_pair_dists, frames
+
+   # Start positions are the baseline, so the very first step already counts for the deadlock check.
+   deadlock_detector.update({d.drone_id: d.position() for d in sim.drones})
 
    for step_idx in range(max_steps):
       if store_gif:
@@ -176,6 +185,12 @@ def run_single_scenario(scenario: ScenarioConfig, max_steps: int, trace_len: int
       # Check if all drones reached destination
       if all_drones_reached_destination(sim.drones):
          status = Status.FINISHED
+         break
+
+      # Deadlock: every drone has barely moved for deadlock_steps consecutive steps
+      if deadlock_detector.update({d.drone_id: d.position() for d in sim.drones}):
+         print(f"  Deadlock at step {step_idx}: all drones moved < {deadlock_min_movement} m per step for {deadlock_steps} steps")
+         status = Status.DEADLOCK
          break
 
       if timeout is not None and (time.perf_counter() - t0) >= timeout:
