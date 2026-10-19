@@ -14,6 +14,7 @@ class Status(StrEnum):
    NO_POSSIBLE_PLACEMENT = "no_possible_placement"
    ERROR = "error"
    TIMEOUT = "timeout"
+   DEADLOCK = "deadlock"
 
 def thread_unsafe_print_results(all_pair_dists: list[float], horizon: int, jerk_3d_value: float, num_drones: int, out_dir: Path, status: Status,
                                 step_durations: list[float], step_mean_pair_dists: list[float], wall_time: float, coordinator_type: str, controller_type: str) -> None:

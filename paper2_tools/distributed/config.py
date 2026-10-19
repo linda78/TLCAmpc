@@ -17,6 +17,12 @@ MAX_STEPS: int = 10000
 TRACE_LEN: int = 10000
 TIMEOUT_MS: int = 86400
 
+# Deadlock check: a run ends with status "deadlock" once every drone moved less than
+# DEADLOCK_MIN_MOVEMENT metres per step for DEADLOCK_STEPS consecutive steps. With DT = 0.1 s
+# that is 0.1 m/s for 10 s of simulated time. None disables the check.
+DEADLOCK_STEPS: int | None = 100
+DEADLOCK_MIN_MOVEMENT: float = 0.01
+
 
 def placement_seed(run_index: int, n_drones: int) -> int:
     """Seed for the start/target placement of one (run, N) pair.

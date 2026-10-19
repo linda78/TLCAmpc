@@ -123,3 +123,39 @@ def piecewise_linear_loss_3d(points, penalty=1.0, eps_step=1e-6, angle_threshold
    segment_starts = breaks[:-1]
 
    return loss, fitted, segment_starts
+
+
+class DeadlockDetector:
+   """Flags a deadlock once every drone has barely moved for a run of consecutive steps.
+
+   Feed it the drone positions after each simulation step (and once with the start positions, so the first step is judged too).
+   A drone counts as moving in a step when it travelled at least ``min_movement`` metres since the previous positions; a step is
+   quiet when no drone moved. ``window`` consecutive quiet steps are a deadlock. ``window=None`` disables the check, so callers
+   can pass the setting straight through without branching.
+   """
+
+   def __init__(self, window: int | None, min_movement: float) -> None:
+      if window is not None and window < 1:
+         raise ValueError(f"window must be >= 1 or None, got {window}")
+      if min_movement < 0.0:
+         raise ValueError(f"min_movement must be >= 0, got {min_movement}")
+      self.window = window
+      self.min_movement = min_movement
+      self.quiet_steps = 0
+      self._previous: dict[str, np.ndarray] | None = None
+
+   def update(self, positions: dict[str, np.ndarray]) -> bool:
+      """Record the positions after a step. Returns True once the quiet run has reached ``window`` steps."""
+      if self.window is None:
+         return False
+      current = {drone_id: np.array(p, dtype=float, copy=True) for drone_id, p in positions.items()}
+      if self._previous is not None and current.keys() == self._previous.keys() and self._all_quiet(current):
+         self.quiet_steps += 1
+      else:
+         self.quiet_steps = 0
+      self._previous = current
+      return self.quiet_steps >= self.window
+
+   def _all_quiet(self, current: dict[str, np.ndarray]) -> bool:
+      assert self._previous is not None
+      return all(float(np.linalg.norm(p - self._previous[drone_id])) < self.min_movement for drone_id, p in current.items())
