@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from drone_sim.domain.drone import Drone
 from drone_sim.domain.registry import register_coordinator
 from drone_sim.simulation.centralized.global_mpc import GlobalMPCSolver
+from drone_sim.simulation.utils.cpu_costs import CpuCostLedger
 
 
 @register_coordinator("mpc_central")
@@ -35,10 +36,13 @@ class CentralMPCGlobalCoordinator:
    max_iter: int = 120
    f_tol: float = 1e-3
 
+   # Shared CPU-time ledger, see drone_sim.simulation.utils.cpu_costs
+   costs: CpuCostLedger = field(default_factory=CpuCostLedger, repr=False)
+
    def __post_init__(self) -> None:
       self._u_prev: dict[str, np.ndarray] = {}
       self._solver = GlobalMPCSolver(
-         dt=self.dt, horizon=self.horizon,
+         dt=self.dt, horizon=self.horizon, costs=self.costs,
          max_iter=self.max_iter, f_tol=self.f_tol,
          room_wall_tolerance=self.room_wall_tolerance,
          symmetry_break_accel=self.symmetry_break_accel,

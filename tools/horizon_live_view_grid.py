@@ -14,10 +14,11 @@ from PIL import Image
 from drone_sim.api.render import render_png
 from drone_sim.domain.config import ScenarioConfig
 from drone_sim.simulation.simulator import Simulator
+from drone_sim.simulation.utils.cpu_costs import CpuCostLedger
 from drone_sim.domain.utils.helper import all_drones_reached_destination
 from tools.utility.constants import AZIM, DPI, ELEV, GIF_HEIGHT, GIF_WIDTH
 from tools.utility.helper import DeadlockDetector, pairwise_distances, piecewise_linear_loss_3d
-from tools.utility.printer import print_gif, print_results_prep, Status
+from tools.utility.printer import cost_row, print_gif, print_results_prep, Status
 from tools.utility.scenario_creator import create_scenario
 
 # Lock for thread-safe CSV writing
@@ -25,10 +26,11 @@ _csv_lock = threading.Lock()
 
 
 def _print_results(all_pair_dists: list[float], horizon: int, jerk_3d_value: float, num_drones: int, out_dir: Path, status: Status, step_durations: list[float],
-                   step_mean_pair_dists: list[float], wall_time: float, coordinator_type: str, controller_type: str) -> None:
+                   step_mean_pair_dists: list[float], wall_time: float, coordinator_type: str, controller_type: str,
+                   costs: dict[str, float | int] | None = None) -> None:
    fieldnames, row = print_results_prep(all_pair_dists=all_pair_dists, horizon=horizon, jerk_3d_value=jerk_3d_value, num_drones=num_drones, status=status,
                                         step_durations=step_durations, step_mean_pair_dists=step_mean_pair_dists, wall_time=wall_time,
-                                        coordinator_type=coordinator_type, controller_type=controller_type)
+                                        coordinator_type=coordinator_type, controller_type=controller_type, costs=costs)
 
    # Write metrics to CSV (one row per scenario) in the same output directory. Use lock for thread-safe writing.
    csv_path = out_dir / "metrics.csv"
@@ -46,7 +48,7 @@ def _run_single_scenario_live_view(*, num_drones: int, horizon: int, out_dir: Pa
                                    coordinator_type: str = "mpc_central", max_steps: int = 500, gif_fps: float = 20.0, trace_len: int = 50) -> None:
    # create and run scenario
    cfg = create_scenario(n_drones=num_drones, horizon=horizon, controller_type=controller_type, coordinator_type=coordinator_type)
-   status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, frames = run_single_scenario(cfg, max_steps, trace_len)
+   status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, frames, costs = run_single_scenario(cfg, max_steps, trace_len)
 
    # save gif and print results
    out_dir.mkdir(parents=True, exist_ok=True)
@@ -56,7 +58,7 @@ def _run_single_scenario_live_view(*, num_drones: int, horizon: int, out_dir: Pa
    print_gif(frames=frames, gif_path=gif_path, gif_fps=gif_fps)
    _print_results(all_pair_dists=all_pair_dists, horizon=horizon, jerk_3d_value=jerk_3d_value, num_drones=num_drones, out_dir=out_dir, status=status,
                   step_durations=step_durations, step_mean_pair_dists=step_mean_pair_dists, wall_time=wall_time, coordinator_type=coordinator_type,
-                  controller_type=controller_type)
+                  controller_type=controller_type, costs=costs)
 
 
 def _run_scenario_wrapper(num_drones: int, horizon: int, out_dir: Path, coordinator_type: str, max_steps: int, gif_fps: float, trace_len: int) -> \
@@ -72,7 +74,7 @@ tuple[int, int, str]:
 
 def run_single_scenario(scenario: ScenarioConfig, max_steps: int, trace_len: int, timeout: float | None = None, store_gif: bool = True,
                         deadlock_steps: int | None = None, deadlock_min_movement: float = 0.0) -> tuple[
-   Status, float, float, list[float], list[float], list[float], list[Image.Image]]:
+   Status, float, float, list[float], list[float], list[float], list[Image.Image], dict[str, float | int]]:
    """
    Run one (N, H) pair using direct simulator execution and returns all relevant information to create csv and gif
 
@@ -83,11 +85,13 @@ def run_single_scenario(scenario: ScenarioConfig, max_steps: int, trace_len: int
    :param deadlock_steps: Optional number of consecutive steps in which every drone moved less than ``deadlock_min_movement``
                           before the run counts as a deadlock and returns with Status.DEADLOCK. None disables the check.
    :param deadlock_min_movement: Movement (metres per step) below which a drone counts as not moving for the deadlock check.
-   :return: status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, frames
+   :return: status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, frames, costs. ``costs`` is the
+            cost_row() of the run: CPU seconds per phase (see drone_sim.simulation.utils.cpu_costs) plus evaluation counts.
    """
    status = Status.RUNNING
 
    t0 = time.perf_counter()
+   cpu0 = time.process_time()
 
    # Metrics accumulators
    step_durations: list[float] = []
@@ -153,10 +157,14 @@ def run_single_scenario(scenario: ScenarioConfig, max_steps: int, trace_len: int
       sim = Simulator.from_config(scenario)
    except Exception as e:
       print(f"  Error creating simulator: {e}")
-      return Status.ERROR, time.perf_counter() - t0, _compute_jerk_3d_value(), step_durations, step_mean_pair_dists, all_pair_dists, frames
+      return (Status.ERROR, time.perf_counter() - t0, _compute_jerk_3d_value(), step_durations, step_mean_pair_dists, all_pair_dists, frames,
+              cost_row(CpuCostLedger(), cpu_total_s=time.process_time() - cpu0))
+
+   ledger = sim.costs
 
    # Start positions are the baseline, so the very first step already counts for the deadlock check.
-   deadlock_detector.update({d.drone_id: d.position() for d in sim.drones})
+   with ledger.phase("deadlock"):
+      deadlock_detector.update({d.drone_id: d.position() for d in sim.drones})
 
    for step_idx in range(max_steps):
       if store_gif:
@@ -180,15 +188,20 @@ def run_single_scenario(scenario: ScenarioConfig, max_steps: int, trace_len: int
       t_step1 = time.perf_counter()
       step_durations.append(t_step1 - t_step0)
 
-      distance_calculations(sim)
+      with ledger.phase("metrics"):
+         distance_calculations(sim)
 
       # Check if all drones reached destination
-      if all_drones_reached_destination(sim.drones):
+      with ledger.phase("metrics"):
+         finished = all_drones_reached_destination(sim.drones)
+      if finished:
          status = Status.FINISHED
          break
 
       # Deadlock: every drone has barely moved for deadlock_steps consecutive steps
-      if deadlock_detector.update({d.drone_id: d.position() for d in sim.drones}):
+      with ledger.phase("deadlock"):
+         deadlocked = deadlock_detector.update({d.drone_id: d.position() for d in sim.drones})
+      if deadlocked:
          print(f"  Deadlock at step {step_idx}: all drones moved < {deadlock_min_movement} m per step for {deadlock_steps} steps")
          status = Status.DEADLOCK
          break
@@ -202,7 +215,10 @@ def run_single_scenario(scenario: ScenarioConfig, max_steps: int, trace_len: int
       # Loop completed without break - hit max_steps
       status = Status.MAX_STEPS
 
-   return status, time.perf_counter() - t0, _compute_jerk_3d_value(), step_durations, step_mean_pair_dists, all_pair_dists, frames
+   with ledger.phase("metrics"):
+      jerk_3d_value = _compute_jerk_3d_value()
+   costs = cost_row(ledger, cpu_total_s=time.process_time() - cpu0)
+   return status, time.perf_counter() - t0, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, frames, costs
 
 
 def main(argv: list[str] | None = None) -> None:

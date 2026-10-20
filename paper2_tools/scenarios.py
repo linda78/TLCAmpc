@@ -43,10 +43,11 @@ _HIGH_DRONE_THRESHOLD = 20
 
 
 def _print_results(all_pair_dists: list[float], horizon: int, jerk_3d_value: float, num_drones: int, out_dir: Path, status: Status, step_durations: list[float],
-                   step_mean_pair_dists: list[float], wall_time: float, coordinator_type: str, controller_type: str) -> None:
+                   step_mean_pair_dists: list[float], wall_time: float, coordinator_type: str, controller_type: str,
+                   costs: dict[str, float | int] | None = None) -> None:
    fieldnames, row = print_results_prep(all_pair_dists=all_pair_dists, horizon=horizon, jerk_3d_value=jerk_3d_value, num_drones=num_drones, status=status,
                                         step_durations=step_durations, step_mean_pair_dists=step_mean_pair_dists, wall_time=wall_time,
-                                        coordinator_type=coordinator_type, controller_type=controller_type)
+                                        coordinator_type=coordinator_type, controller_type=controller_type, costs=costs)
 
    # Write metrics to CSV (one row per scenario) in the same output directory. Use lock for thread-safe writing.
    csv_path = out_dir / 'metrics.csv'
@@ -77,12 +78,12 @@ def _run_scenario_wrapper(scenario: ScenarioConfig, out_dir: Path, max_steps: in
    horizon = scenario.controller.params.get('horizon', -1)
    try:
       print(f'  Starting {num_drones} drones ({scenario.controller.type}, {scenario.coordinator.type})')
-      status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, frames = \
+      status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, frames, costs = \
             run_single_scenario(scenario=scenario, max_steps=max_steps, trace_len=trace_len, timeout=timeout, store_gif=should_print_gif)
 
       _print_results(all_pair_dists=all_pair_dists, horizon=horizon, jerk_3d_value=jerk_3d_value, num_drones=num_drones, out_dir=out_dir, status=status,
                      step_durations=step_durations, step_mean_pair_dists=step_mean_pair_dists, wall_time=wall_time, coordinator_type=scenario.coordinator.type,
-                     controller_type=scenario.controller.type)
+                     controller_type=scenario.controller.type, costs=costs)
 
       if should_print_gif:
          _safe_gif(out_dir, num_drones, frames, status, wall_time, scenario)
@@ -111,11 +112,11 @@ def _run_worker(cfg_queue_csv_path: Path, lock_path: Path, result_dir: Path, v_m
                             safety_zone=adaptive_safety_zone if controller == 'mpc_agent_adaptive' else static_safety_zone)
 
       print(f'  Starting {n_drones} drones ({cfg.controller.type}, {cfg.coordinator.type})')
-      status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, frames = run_single_scenario(scenario=cfg, max_steps=10000,
+      status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, frames, costs = run_single_scenario(scenario=cfg, max_steps=10000,
             trace_len=10000, timeout=600000, store_gif=False)
       _print_results(all_pair_dists=all_pair_dists, jerk_3d_value=jerk_3d_value, num_drones=n_drones, out_dir=result_dir, status=status,
                      step_durations=step_durations, step_mean_pair_dists=step_mean_pair_dists, wall_time=wall_time, coordinator_type=cfg.coordinator.type,
-                     controller_type=cfg.controller.type, horizon=_HORIZON)
+                     controller_type=cfg.controller.type, horizon=_HORIZON, costs=costs)
       update_row(cfg_queue_csv_path, lock_path, queue_id)
    except Exception as e:
       print(f"Exception in worker: {e}")
