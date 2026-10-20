@@ -9,6 +9,7 @@ from drone_sim.domain.config import ColorValue, ScenarioConfig
 from drone_sim.domain.constraints import point_to_box_dist
 from drone_sim.domain.drone import Drone, Route
 from drone_sim.domain.registry import create_controller, create_coordinator, create_physics
+from drone_sim.simulation.utils.cpu_costs import CpuCostLedger
 
 
 def _normalize_color(c: ColorValue) -> str | tuple[float, float, float]:
@@ -59,6 +60,9 @@ class Simulator:
 
    # Wall-clock seconds spent inside `step()` so far (cumulative).
    compute_time_s: float = 0.0
+
+   # CPU seconds per phase, shared with the coordinator and its solvers. See drone_sim.simulation.utils.cpu_costs.
+   costs: CpuCostLedger = field(default_factory=CpuCostLedger, repr=False)
 
    @classmethod
    def from_config(cls, cfg: ScenarioConfig) -> "Simulator":
@@ -136,7 +140,8 @@ class Simulator:
          room_min = p_min - margin
          room_max = p_max + margin
 
-      sim = cls(dt=cfg.dt, physics=physics, drones=drones, obstacles=obstacles, room_min=room_min, room_max=room_max, coordinator=coordinator)
+      sim = cls(dt=cfg.dt, physics=physics, drones=drones, obstacles=obstacles, room_min=room_min, room_max=room_max, coordinator=coordinator,
+                costs=getattr(coordinator, "costs", None) or CpuCostLedger())
 
       # Initialize traces with the start positions.
       sim.traces = {d.drone_id: [d.position().copy()] for d in sim.drones}
@@ -184,16 +189,17 @@ class Simulator:
          self.infeasible = False
          self.infeasible_reason = None
 
-         # Compute controls based on current state (synchronous)
-         us: list[np.ndarray] = []
+         with self.costs.phase("physics"):
+            # Compute controls based on current state (synchronous)
+            us: list[np.ndarray] = []
 
-         # Refresh route refs first (so all neighbor refs are consistent).
-         for d in self.drones:
-            d.route.advance_if_reached(d.position())
+            # Refresh route refs first (so all neighbor refs are consistent).
+            for d in self.drones:
+               d.route.advance_if_reached(d.position())
 
-         positions = [d.position().copy() for d in self.drones]
-         velocities = [d.velocity().copy() for d in self.drones]
-         prefs = [d.route.current_ref().copy() for d in self.drones]
+            positions = [d.position().copy() for d in self.drones]
+            velocities = [d.velocity().copy() for d in self.drones]
+            prefs = [d.route.current_ref().copy() for d in self.drones]
 
          # This build expects a centralized MPC coordinator.
          # All Paper/"basic_paper" configs provide `coordinator: {"type": "mpc_central", ...}`.
@@ -202,16 +208,17 @@ class Simulator:
             raise RuntimeError(
                "Simulator-step requires a coordinator (centralized MPC). Provide `coordinator` in ScenarioConfig.")
 
-         # First compute per-drone local controls (used for non-optimized drones, and as a fallback).
-         for i, d in enumerate(self.drones):
-            neighbors = [(positions[j], velocities[j], self.drones[j].radius, self.drones[j].safety_zone, prefs[j],) for
-                         j in range(len(self.drones)) if j != i]
+         with self.costs.phase("physics"):
+            # First compute per-drone local controls (used for non-optimized drones, and as a fallback).
+            for i, d in enumerate(self.drones):
+               neighbors = [(positions[j], velocities[j], self.drones[j].radius, self.drones[j].safety_zone, prefs[j],) for
+                            j in range(len(self.drones)) if j != i]
 
-            if hasattr(d.controller, "control"):
-               u = d.controller.control(d, neighbors, self.obstacles)
-            else:
-               u = np.zeros(3, dtype=float)
-            us.append(np.asarray(u, dtype=float).reshape(3))
+               if hasattr(d.controller, "control"):
+                  u = d.controller.control(d, neighbors, self.obstacles)
+               else:
+                  u = np.zeros(3, dtype=float)
+               us.append(np.asarray(u, dtype=float).reshape(3))
 
          # Then override optimized drones with coordinator outputs.
          try:
@@ -226,33 +233,34 @@ class Simulator:
             self.infeasible_reason = str(exc)
             return
 
-         for i, d in enumerate(self.drones):
-            if d.drone_id in u_by_id:
-               us[i] = np.asarray(u_by_id[d.drone_id], dtype=float).reshape(3)
+         with self.costs.phase("physics"):
+            for i, d in enumerate(self.drones):
+               if d.drone_id in u_by_id:
+                  us[i] = np.asarray(u_by_id[d.drone_id], dtype=float).reshape(3)
 
-         # Apply physics updates
-         for d, u in zip(self.drones, us, strict=True):
-            d.x = d.predict(u)
-            # d.x = self.physics.step(d.x, u)
+            # Apply physics updates
+            for d, u in zip(self.drones, us, strict=True):
+               d.x = d.predict(u)
+               # d.x = self.physics.step(d.x, u)
 
-            # Keep the drone inside the room bounds. We clamp the position and zero the velocity component(s) that hit a wall.
-            p = d.position()
-            p_min = self.room_min + d.radius
-            p_max = self.room_max - d.radius
+               # Keep the drone inside the room bounds. We clamp the position and zero the velocity component(s) that hit a wall.
+               p = d.position()
+               p_min = self.room_min + d.radius
+               p_max = self.room_max - d.radius
 
-            p_clamped = np.clip(p, p_min, p_max)
-            hit = ~np.isclose(p_clamped, p)
-            if np.any(hit):
-               d.x[:3] = p_clamped
-               d.x[3:][hit] = 0.0
+               p_clamped = np.clip(p, p_min, p_max)
+               hit = ~np.isclose(p_clamped, p)
+               if np.any(hit):
+                  d.x[:3] = p_clamped
+                  d.x[3:][hit] = 0.0
 
-            # Append trace point (after clamping).
-            trace = self.traces.setdefault(d.drone_id, [])
-            trace.append(d.position().copy())
-            if len(trace) > self.trace_len:
-               del trace[:-self.trace_len]
+               # Append trace point (after clamping).
+               trace = self.traces.setdefault(d.drone_id, [])
+               trace.append(d.position().copy())
+               if len(trace) > self.trace_len:
+                  del trace[:-self.trace_len]
 
-         self.last_collisions = self._compute_collisions()
+            self.last_collisions = self._compute_collisions()
 
          self.t += self.dt
          self.step_count += 1

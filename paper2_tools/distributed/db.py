@@ -52,15 +52,38 @@ CREATE TABLE IF NOT EXISTS metrics (
 );
 """
 
+# CPU-time columns of one run, filled from tools.utility.printer.cost_row (same names and order as COST_FIELDNAMES there).
+# They are added to existing databases by ensure_schema(); rows written before that keep NULL.
+_COST_COLUMNS: list[tuple[str, str]] = [
+    ("cpu_total_s", "DOUBLE PRECISION"),
+    *((f"cpu_{phase}_s", "DOUBLE PRECISION") for phase in
+      ("setup", "cost", "constraints", "solver", "validate", "exchange", "admm_update", "physics", "metrics", "deadlock")),
+    ("admm_iterations", "INTEGER"),
+    ("cost_evals", "INTEGER"),
+    ("constraint_evals", "INTEGER"),
+]
+
+_MIGRATION_SQL = "\n".join(f"ALTER TABLE metrics ADD COLUMN IF NOT EXISTS {name} {sql_type};" for name, sql_type in _COST_COLUMNS)
+
+_BASE_METRIC_COLUMNS = [
+    "num_drones", "horizon", "coordinator", "controller_type", "status", "steps",
+    "wall_time_s", "min_step_time_s", "max_step_time_s", "mean_step_time_s",
+    "min_distance", "max_distance", "mean_distance_all_pairs",
+    "mean_distance_step_mean", "jerk_3d_value",
+]
+_METRIC_COLUMNS = _BASE_METRIC_COLUMNS + [name for name, _ in _COST_COLUMNS]
+
 
 def get_connection():
     return psycopg2.connect(get_database_url())
 
 
 def ensure_schema() -> None:
+    """Create the tables and add the cost columns to a metrics table from before they existed. Idempotent."""
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(_SCHEMA_SQL)
+            cur.execute(_MIGRATION_SQL)
         conn.commit()
 
 
@@ -91,28 +114,55 @@ def insert_runs(runs: range, drones: range, coordinators: list[str], controllers
 
 
 # ---------------------------------------------------------------------------
-# Task claiming  (FOR UPDATE SKIP LOCKED)
+# Task claiming in packages
 # ---------------------------------------------------------------------------
+#
+# A package is one (n_drones, coordinator, controller) combination with all its runs. It belongs to the host that claimed its
+# first row (claimed_by is the hostname, shared by all worker processes of a server). A process first takes a pending row of a
+# package its host already owns, smallest N first, and only when none is left starts the lowest-N package nobody owns. The
+# advisory lock serialises all claims, so two hosts can never start the same package at the same time.
 
-def claim_task() -> dict[str, Any] | None:
-    """Atomically claim the next pending task. Returns row dict or None."""
-    hostname = socket.gethostname()
-    sql = """
+_CLAIM_LOCK_ID = 7312001
+
+_PACKAGE_OWNED_BY_HOST = """EXISTS (
+                SELECT 1 FROM scenario_runs o
+                WHERE o.n_drones = r.n_drones AND o.coordinator = r.coordinator AND o.controller = r.controller
+                  AND o.claimed_by = %s
+            )"""
+
+_PACKAGE_UNOWNED = """NOT EXISTS (
+                SELECT 1 FROM scenario_runs o
+                WHERE o.n_drones = r.n_drones AND o.coordinator = r.coordinator AND o.controller = r.controller
+                  AND o.claimed_by IS NOT NULL
+            )"""
+
+
+def _claim_sql(package_filter: str) -> str:
+    return f"""
         UPDATE scenario_runs
         SET status = 'running', claimed_by = %s, claimed_at = now()
         WHERE id = (
-            SELECT id FROM scenario_runs
-            WHERE status = 'pending'
-            ORDER BY n_drones ASC, id ASC
+            SELECT r.id FROM scenario_runs r
+            WHERE r.status = 'pending' AND {package_filter}
+            ORDER BY r.n_drones ASC, r.id ASC
             FOR UPDATE SKIP LOCKED
             LIMIT 1
         )
         RETURNING id, run_index, n_drones, coordinator, controller;
     """
+
+
+def claim_task() -> dict[str, Any] | None:
+    """Atomically claim the next pending task of this host's packages, or start a new package. Returns row dict or None."""
+    hostname = socket.gethostname()
     with get_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(sql, (hostname,))
+            cur.execute("SELECT pg_advisory_xact_lock(%s)", (_CLAIM_LOCK_ID,))
+            cur.execute(_claim_sql(_PACKAGE_OWNED_BY_HOST), (hostname, hostname))
             row = cur.fetchone()
+            if row is None:
+                cur.execute(_claim_sql(_PACKAGE_UNOWNED), (hostname,))
+                row = cur.fetchone()
         conn.commit()
     return dict(row) if row else None
 
@@ -122,27 +172,10 @@ def claim_task() -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 
 def insert_metrics(scenario_run_id: int, row: dict[str, Any]) -> None:
-    """Insert a metrics row linked to the scenario run."""
-    sql = """
-        INSERT INTO metrics (
-            scenario_run_id, num_drones, horizon, coordinator, controller_type,
-            status, steps, wall_time_s, min_step_time_s, max_step_time_s,
-            mean_step_time_s, min_distance, max_distance, mean_distance_all_pairs,
-            mean_distance_step_mean, jerk_3d_value
-        ) VALUES (
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s,
-            %s, %s, %s, %s,
-            %s, %s
-        )
-    """
-    params = (
-        scenario_run_id,
-        row["num_drones"], row["horizon"], row["coordinator"], row["controller_type"],
-        row["status"], row["steps"], row["wall_time_s"], row["min_step_time_s"], row["max_step_time_s"],
-        row["mean_step_time_s"], row["min_distance"], row["max_distance"], row["mean_distance_all_pairs"],
-        row["mean_distance_step_mean"], row["jerk_3d_value"],
-    )
+    """Insert a metrics row linked to the scenario run. Cost columns missing from ``row`` are stored as NULL."""
+    columns = ["scenario_run_id", *_METRIC_COLUMNS]
+    sql = f"INSERT INTO metrics ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))})"
+    params = (scenario_run_id, *[row[name] for name in _BASE_METRIC_COLUMNS], *[row.get(name) for name, _ in _COST_COLUMNS])
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, params)
@@ -181,12 +214,7 @@ def count_by_status() -> dict[str, int]:
 # CSV export
 # ---------------------------------------------------------------------------
 
-_EXPORT_FIELDNAMES = [
-    "num_drones", "horizon", "coordinator", "controller_type", "status", "steps",
-    "wall_time_s", "min_step_time_s", "max_step_time_s", "mean_step_time_s",
-    "min_distance", "max_distance", "mean_distance_all_pairs",
-    "mean_distance_step_mean", "jerk_3d_value",
-]
+_EXPORT_FIELDNAMES = list(_METRIC_COLUMNS)
 
 
 def export_metrics_rows() -> tuple[list[str], list[dict[str, Any]]]:

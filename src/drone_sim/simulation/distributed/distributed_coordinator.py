@@ -15,6 +15,7 @@ from drone_sim.simulation.distributed.admm_state import ADMMState
 from drone_sim.simulation.distributed.local_mpc import LocalMPCSolver, _pad_or_trim_horizon
 from drone_sim.simulation.distributed.neighbor_graph import NeighborGraph
 from drone_sim.simulation.distributed.trajectory_exchange import TrajectoryMailbox
+from drone_sim.simulation.utils.cpu_costs import CpuCostLedger
 
 
 @register_coordinator("dmpc_admm")
@@ -40,6 +41,9 @@ class DistributedMPCCoordinator:
    comm_radius: float | None = None  # For NeighborGraph
    gauss_seidel: bool = True  # Use Gauss-Seidel updates for symmetry breaking
    stagnation_limit: int = 3  # Break early if no drone makes progress for this many iterations
+
+   # Shared CPU-time ledger, see drone_sim.simulation.utils.cpu_costs
+   costs: CpuCostLedger = field(default_factory=CpuCostLedger, repr=False)
 
    # Internal state (initialized in __post_init__)
    _neighbor_graph: NeighborGraph = field(init=False)
@@ -67,61 +71,66 @@ class DistributedMPCCoordinator:
       :param room_max: Room upper bounds (3,) or None
       :return: Dict mapping drone_id to control (3,) for first timestep
       """
-      # Identify which drones to optimize (must have central_cost interface)
-      opt_drones = [d for d in drones if has_central_cost(d.controller)]
+      ledger = self.costs
 
-      if not opt_drones:
-         return {}
+      with ledger.phase("setup"):
+         # Identify which drones to optimize (must have central_cost interface)
+         opt_drones = [d for d in drones if has_central_cost(d.controller)]
 
-      # TODO: get rid of this all over list handlings. Use the drones list instead
-      opt_ids = [d.drone_id for d in opt_drones]
-      drone_by_id = {d.drone_id: d for d in opt_drones}
-      all_drones_by_id = {d.drone_id: d for d in drones}
+         if not opt_drones:
+            return {}
 
-      # 1. Update neighbor graph from current positions
-      positions = {d.drone_id: np.asarray(d.x, dtype=float)[:3] for d in drones}
-      self._neighbor_graph.update(positions)
+         # TODO: get rid of this all over list handlings. Use the drones list instead
+         opt_ids = [d.drone_id for d in opt_drones]
+         drone_by_id = {d.drone_id: d for d in opt_drones}
+         all_drones_by_id = {d.drone_id: d for d in drones}
 
-      # 2. Get neighbor pairs and initialize ADMMState
-      neighbor_pairs = self._neighbor_graph.get_neighbor_pairs()
-      self._admm_state.initialize(neighbor_pairs)
+         # 1. Update neighbor graph from current positions
+         positions = {d.drone_id: np.asarray(d.x, dtype=float)[:3] for d in drones}
+         self._neighbor_graph.update(positions)
 
-      trajectories, local_solvers = self.init_trajectories(drones)
+         # 2. Get neighbor pairs and initialize ADMMState
+         neighbor_pairs = self._neighbor_graph.get_neighbor_pairs()
+         self._admm_state.initialize(neighbor_pairs)
 
-      # Add static trajectories for non-optimized drones (needed for neighbor pairs)
-      for drone in drones:
-         if drone.drone_id not in drone_by_id:
-            pos = np.asarray(drone.x, dtype=float)[:3]
-            trajectories[drone.drone_id] = np.tile(pos, (self.horizon, 1))
+         trajectories, local_solvers = self.init_trajectories(drones)
 
-      # 3. ADMM iteration loop
-      converged = False
-      stagnated = False
+         # Add static trajectories for non-optimized drones (needed for neighbor pairs)
+         for drone in drones:
+            if drone.drone_id not in drone_by_id:
+               pos = np.asarray(drone.x, dtype=float)[:3]
+               trajectories[drone.drone_id] = np.tile(pos, (self.horizon, 1))
 
-      # Track controls and velocities across iterations
-      controls: dict[str, np.ndarray] = {}
-      velocities: dict[str, np.ndarray | None] = {did: None for did in trajectories}
+         # 3. ADMM iteration loop
+         converged = False
+         stagnated = False
 
-      # Track trajectory changes for stagnation detection
-      prev_trajectories: dict[str, np.ndarray] = {did: traj.copy() for did, traj in trajectories.items()}
-      stagnation_count = 0
+         # Track controls and velocities across iterations
+         controls: dict[str, np.ndarray] = {}
+         velocities: dict[str, np.ndarray | None] = {did: None for did in trajectories}
+
+         # Track trajectory changes for stagnation detection
+         prev_trajectories: dict[str, np.ndarray] = {did: traj.copy() for did, traj in trajectories.items()}
+         stagnation_count = 0
 
       iteration = 0
       for iteration in range(self.max_admm_iter):
          # Determine drone solving order for this iteration
-         drone_order = list(opt_ids)
-         if self.gauss_seidel:
-            if iteration < 3:
-               # First few iterations: random shuffle for initial symmetry breaking
-               random.shuffle(drone_order)
-            else:
-               # Later iterations: priority-based ordering (most constrained first)
-               drone_order.sort(key=lambda d: self._compute_priority(d, trajectories, velocities, all_drones_by_id))
+         with ledger.phase("setup"):
+            drone_order = list(opt_ids)
+            if self.gauss_seidel:
+               if iteration < 3:
+                  # First few iterations: random shuffle for initial symmetry breaking
+                  random.shuffle(drone_order)
+               else:
+                  # Later iterations: priority-based ordering (most constrained first)
+                  drone_order.sort(key=lambda d: self._compute_priority(d, trajectories, velocities, all_drones_by_id))
 
          # 3a. Broadcast current trajectories via mailbox (initial state)
-         self._mailbox.clear()
-         for drone_id in opt_ids:
-            self._mailbox.broadcast(sender_id=drone_id, trajectory=trajectories[drone_id], predicted_velocities=None, timestamp=0, neighbor_graph=self._neighbor_graph)
+         with ledger.phase("exchange"):
+            self._mailbox.clear()
+            for drone_id in opt_ids:
+               self._mailbox.broadcast(sender_id=drone_id, trajectory=trajectories[drone_id], predicted_velocities=None, timestamp=0, neighbor_graph=self._neighbor_graph)
 
          # 3b. For each drone: receive neighbors, solve local MPC
          if self.gauss_seidel:
@@ -131,13 +140,15 @@ class DistributedMPCCoordinator:
                solver = local_solvers[drone_id]
 
                # Get neighbor trajectories from mailbox (includes any updates)
-               messages = self._mailbox.receive(drone_id)
-               neighbor_trajectories = {
-                  sid: (msg.trajectory, msg.predicted_velocities)
-                  for sid, msg in messages.items()
-               }
+               with ledger.phase("exchange"):
+                  messages = self._mailbox.receive(drone_id)
+                  neighbor_trajectories = {
+                     sid: (msg.trajectory, msg.predicted_velocities)
+                     for sid, msg in messages.items()
+                  }
 
-               u_prev = self._warm_start_controls(drone_id, iteration, controls)
+               with ledger.phase("setup"):
+                  u_prev = self._warm_start_controls(drone_id, iteration, controls)
                u_opt, traj_opt, success, vel_opt = solver.solve(
                   drone=drone, neighbor_trajectories=neighbor_trajectories,
                   obstacles=obstacles, room_min=room_min, room_max=room_max, u_prev=u_prev,
@@ -149,33 +160,37 @@ class DistributedMPCCoordinator:
                velocities[drone_id] = vel_opt
 
                # Broadcast immediately so next drone sees updated trajectory
-               self._mailbox.broadcast(sender_id=drone_id, trajectory=traj_opt,
-                                       predicted_velocities=vel_opt, timestamp=0,
-                                       neighbor_graph=self._neighbor_graph)
+               with ledger.phase("exchange"):
+                  self._mailbox.broadcast(sender_id=drone_id, trajectory=traj_opt,
+                                          predicted_velocities=vel_opt, timestamp=0,
+                                          neighbor_graph=self._neighbor_graph)
          else:
             # Jacobi: all drones use stale data, update all at once
             trajectories, controls, velocities = self._jacobi(drone_order, drone_by_id, local_solvers, iteration, obstacles, room_min, room_max, prev_controls=controls)
 
-         # 3c. Stagnation detection — break early if no drone made progress
-         stagnated, prev_trajectories, stagnation_count = self._check_stagnation(
-            trajectories, prev_trajectories, opt_ids, stagnation_count, iteration,
-         )
-         if stagnated:
-            break
+         with ledger.phase("admm_update"):
+            # 3c. Stagnation detection — break early if no drone made progress
+            stagnated, prev_trajectories, stagnation_count = self._check_stagnation(
+               trajectories, prev_trajectories, opt_ids, stagnation_count, iteration,
+            )
+            if stagnated:
+               break
 
-         # 3d. Update z and lambda for all neighbor pairs
-         self.update_z(trajectories, velocities, all_drones_by_id, neighbor_pairs)
+            # 3d. Update z and lambda for all neighbor pairs
+            self.update_z(trajectories, velocities, all_drones_by_id, neighbor_pairs)
 
-         # 3e. Check convergence
-         if self._admm_state.is_converged(trajectories):
-            converged = True
-            break
+            # 3e. Check convergence
+            if self._admm_state.is_converged(trajectories):
+               converged = True
+               break
 
       # Store iteration count for debugging/testing
       self._last_iteration_count = iteration + 1
+      ledger.count("admm_iterations", iteration + 1)
 
       # Record final residuals for debugging/visualization
-      primal_res, dual_res = self._admm_state.compute_residuals(trajectories)
+      with ledger.phase("admm_update"):
+         primal_res, dual_res = self._admm_state.compute_residuals(trajectories)
       self._last_primal_residual = primal_res
       self._last_dual_residual = dual_res
       self._last_converged = converged
@@ -219,6 +234,7 @@ class DistributedMPCCoordinator:
                room_max: np.ndarray | None = None,
                prev_controls: dict[str, np.ndarray] | None = None) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]:
       """Jacobi update: all drones solve using stale neighbor data, then update all at once."""
+      ledger = self.costs
       new_trajectories: dict[str, np.ndarray] = {}
       new_controls: dict[str, np.ndarray] = {}
       new_velocities: dict[str, np.ndarray] = {}
@@ -227,13 +243,15 @@ class DistributedMPCCoordinator:
          drone = drone_by_id[drone_id]
          solver = local_solvers[drone_id]
 
-         messages = self._mailbox.receive(drone_id)
-         neighbor_trajectories = {
-            sid: (msg.trajectory, msg.predicted_velocities)
-            for sid, msg in messages.items()
-         }
+         with ledger.phase("exchange"):
+            messages = self._mailbox.receive(drone_id)
+            neighbor_trajectories = {
+               sid: (msg.trajectory, msg.predicted_velocities)
+               for sid, msg in messages.items()
+            }
 
-         u_prev = self._warm_start_controls(drone_id, iteration, prev_controls or {})
+         with ledger.phase("setup"):
+            u_prev = self._warm_start_controls(drone_id, iteration, prev_controls or {})
          u_opt, traj_opt, success, vel_opt = solver.solve(
             drone=drone, neighbor_trajectories=neighbor_trajectories,
             obstacles=obstacles, room_min=room_min, room_max=room_max, u_prev=u_prev,
@@ -243,11 +261,12 @@ class DistributedMPCCoordinator:
          new_controls[drone_id] = u_opt
          new_velocities[drone_id] = vel_opt
 
-      # Broadcast updated trajectories with velocities (no extra _predict_states call)
-      for drone_id in drone_order:
-         self._mailbox.broadcast(sender_id=drone_id, trajectory=new_trajectories[drone_id],
-                                 predicted_velocities=new_velocities[drone_id], timestamp=0,
-                                 neighbor_graph=self._neighbor_graph)
+      with ledger.phase("exchange"):
+         # Broadcast updated trajectories with velocities (no extra _predict_states call)
+         for drone_id in drone_order:
+            self._mailbox.broadcast(sender_id=drone_id, trajectory=new_trajectories[drone_id],
+                                    predicted_velocities=new_velocities[drone_id], timestamp=0,
+                                    neighbor_graph=self._neighbor_graph)
 
       return new_trajectories, new_controls, new_velocities
 
@@ -300,7 +319,7 @@ class DistributedMPCCoordinator:
             continue
 
          # Create local solver for this drone with bounds from physics
-         local_solvers[drone.drone_id] = LocalMPCSolver(dt=self.dt, horizon=self.horizon)
+         local_solvers[drone.drone_id] = LocalMPCSolver(dt=self.dt, horizon=self.horizon, costs=self.costs)
 
          # Initialize trajectory from warm-start or initial guess
          if drone.drone_id in self._u_prev:

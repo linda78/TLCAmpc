@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
 from scipy.optimize import minimize, OptimizeResult
 
 from drone_sim.domain.constraints import (MovingObstacleAvoidanceConstraints, ObstacleAvoidanceConstraints, RoomConstraints, VelocityConstraints)
+from drone_sim.simulation.utils.cpu_costs import CpuCostLedger
 
 _log = logging.getLogger(__name__)
 
@@ -44,6 +45,9 @@ class LocalMPCSolver:
    f_tol: float = 1e-4
    symmetry_break_eps: float = 0.05  # Random noise magnitude for symmetry breaking
 
+   # Shared CPU-time ledger, see drone_sim.simulation.utils.cpu_costs
+   costs: CpuCostLedger = field(default_factory=CpuCostLedger, repr=False)
+
    def solve(self, drone: Drone, neighbor_trajectories: dict[str, tuple[np.ndarray, np.ndarray | None]],
              obstacles: list[tuple[np.ndarray, np.ndarray]] | None = None, room_min: np.ndarray | None = None, room_max: np.ndarray | None = None,
              u_prev: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray, bool, np.ndarray]:
@@ -62,43 +66,46 @@ class LocalMPCSolver:
          success: Whether optimization succeeded
          vel_opt: Optimized velocity trajectory (horizon, 3)
       """
-      controller = drone.controller
-      obstacles = obstacles or []
+      ledger = self.costs
 
-      u_min, u_max = drone.bounds()
-      horizon = self.horizon
+      with ledger.phase("setup"):
+         controller = drone.controller
+         obstacles = obstacles or []
 
-      # Initial guess
-      if u_prev is not None:
-         # Warm-start: shift previous solution
-         u0 = np.concatenate([u_prev[1:], u_prev[-1:]], axis=0)
-      else:
-         u0 = _pad_or_trim_horizon(controller.central_initial_guess(drone), horizon)
+         u_min, u_max = drone.bounds()
+         horizon = self.horizon
 
-      u0 = np.clip(u0, u_min, u_max)
+         # Initial guess
+         if u_prev is not None:
+            # Warm-start: shift previous solution
+            u0 = np.concatenate([u_prev[1:], u_prev[-1:]], axis=0)
+         else:
+            u0 = _pad_or_trim_horizon(controller.central_initial_guess(drone), horizon)
 
-      # Symmetry-breaking noise to prevent collinear deadlocks
-      if self.symmetry_break_eps > 0:
-         noise = np.random.uniform(-self.symmetry_break_eps, self.symmetry_break_eps, size=u0.shape, )
-         u0 = np.clip(u0 + noise, u_min, u_max)
+         u0 = np.clip(u0, u_min, u_max)
 
-      # Pre-build constraint evaluators (stateless, depend only on horizon)
-      collision_c = MovingObstacleAvoidanceConstraints(horizon=horizon)
-      obstacle_c = ObstacleAvoidanceConstraints(horizon=horizon)
-      room_c = RoomConstraints(horizon=horizon) if room_min is not None and room_max is not None else None
-      velocity_c = VelocityConstraints(horizon=horizon)
-      # Extract cost weights for inline computation (avoids redundant predict_trajectory in central_cost)
-      qp = np.diag(controller._Qp)  # (3,)
-      qv = np.diag(controller._Qv)  # (3,)
-      r = np.diag(controller._R)    # (3,)
-      lambda_vel = getattr(controller, 'lambda_vel', 0.0)
-      p_ref = np.asarray(drone.route.current_ref(), dtype=float).reshape(3)
+         # Symmetry-breaking noise to prevent collinear deadlocks
+         if self.symmetry_break_eps > 0:
+            noise = np.random.uniform(-self.symmetry_break_eps, self.symmetry_break_eps, size=u0.shape, )
+            u0 = np.clip(u0 + noise, u_min, u_max)
 
-      # Shared prediction cache: cost() and constraints() are called with the same u_flat
-      # by SLSQP on each iteration, so we cache to avoid duplicate predict_trajectory calls.
-      _cache_u = [None]
-      _cache_result = [None]
-      _cache_g = [None]
+         # Pre-build constraint evaluators (stateless, depend only on horizon)
+         collision_c = MovingObstacleAvoidanceConstraints(horizon=horizon)
+         obstacle_c = ObstacleAvoidanceConstraints(horizon=horizon)
+         room_c = RoomConstraints(horizon=horizon) if room_min is not None and room_max is not None else None
+         velocity_c = VelocityConstraints(horizon=horizon)
+         # Extract cost weights for inline computation (avoids redundant predict_trajectory in central_cost)
+         qp = np.diag(controller._Qp)  # (3,)
+         qv = np.diag(controller._Qv)  # (3,)
+         r = np.diag(controller._R)    # (3,)
+         lambda_vel = getattr(controller, 'lambda_vel', 0.0)
+         p_ref = np.asarray(drone.route.current_ref(), dtype=float).reshape(3)
+
+         # Shared prediction cache: cost() and constraints() are called with the same u_flat
+         # by SLSQP on each iteration, so we cache to avoid duplicate predict_trajectory calls.
+         _cache_u = [None]
+         _cache_result = [None]
+         _cache_g = [None]
 
       def _predict_cached(u_flat: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
          if _cache_u[0] is None or not np.array_equal(u_flat, _cache_u[0]):
@@ -108,67 +115,72 @@ class LocalMPCSolver:
          return _cache_result[0]
 
       def cost(u_flat: np.ndarray) -> float:
-         positions, velocities = _predict_cached(u_flat)
-         u = u_flat.reshape((horizon, 3))
-         errors = positions - p_ref
-         return float(
-            np.sum(errors ** 2 * qp)
-            + np.sum(velocities ** 2 * qv)
-            + np.sum(u ** 2 * r)
-            + lambda_vel * np.sum(velocities ** 2)
-         )
+         with ledger.phase("cost"):
+            positions, velocities = _predict_cached(u_flat)
+            u = u_flat.reshape((horizon, 3))
+            errors = positions - p_ref
+            return float(
+               np.sum(errors ** 2 * qp)
+               + np.sum(velocities ** 2 * qv)
+               + np.sum(u ** 2 * r)
+               + lambda_vel * np.sum(velocities ** 2)
+            )
 
       def constraints(u_flat: np.ndarray) -> np.ndarray:
-         positions, velocities = _predict_cached(u_flat)
-         if _cache_g[0] is not None:
-            return _cache_g[0]
+         with ledger.phase("constraints"):
+            positions, velocities = _predict_cached(u_flat)
+            if _cache_g[0] is not None:
+               return _cache_g[0]
 
-         parts = []
-         c = collision_c._evaluate(drone, positions, neighbor_trajectories, pred_vel=velocities)
-         if len(c) > 0:
-            parts.append(c)
-         c = obstacle_c._evaluate(drone, positions, obstacles, pred_vel=velocities)
-         if len(c) > 0:
-            parts.append(c)
-         if room_c is not None:
-            c = room_c._evaluate(drone, positions, room_max, room_min, pred_vel=velocities)
+            parts = []
+            c = collision_c._evaluate(drone, positions, neighbor_trajectories, pred_vel=velocities)
             if len(c) > 0:
                parts.append(c)
-         # Velocity constraints to enforce v_max via SLSQP
-         vel_g = velocity_c.evaluate_single(drone, velocities, np.array([], dtype=float))
-         if len(vel_g) > 0:
-            parts.append(vel_g)
+            c = obstacle_c._evaluate(drone, positions, obstacles, pred_vel=velocities)
+            if len(c) > 0:
+               parts.append(c)
+            if room_c is not None:
+               c = room_c._evaluate(drone, positions, room_max, room_min, pred_vel=velocities)
+               if len(c) > 0:
+                  parts.append(c)
+            # Velocity constraints to enforce v_max via SLSQP
+            vel_g = velocity_c.evaluate_single(drone, velocities, np.array([], dtype=float))
+            if len(vel_g) > 0:
+               parts.append(vel_g)
 
-         g = np.concatenate(parts) if parts else np.array([], dtype=float)
-         _cache_g[0] = g
-         return g
+            g = np.concatenate(parts) if parts else np.array([], dtype=float)
+            _cache_g[0] = g
+            return g
 
-      # Build bounds
-      axis_bounds = [(float(u_min[a]), float(u_max[a])) for a in range(3)]
-      bounds = axis_bounds * horizon
+      with ledger.phase("setup"):
+         # Build bounds
+         axis_bounds = [(float(u_min[a]), float(u_max[a])) for a in range(3)]
+         bounds = axis_bounds * horizon
 
       # Optimize
-      result = minimize(cost, u0.flatten(), method="SLSQP", bounds=bounds, constraints={"type": "ineq", "fun": constraints},
-                        options={"maxiter": self.max_iter, "ftol": self.f_tol, "disp": False})
+      with ledger.phase("solver"):
+         result = minimize(cost, u0.flatten(), method="SLSQP", bounds=bounds, constraints={"type": "ineq", "fun": constraints},
+                           options={"maxiter": self.max_iter, "ftol": self.f_tol, "disp": False})
 
-      u_opt = np.clip(result.x.reshape((horizon, 3)), u_min, u_max)
+      with ledger.phase("validate"):
+         u_opt = np.clip(result.x.reshape((horizon, 3)), u_min, u_max)
 
-      # Reuse cached prediction/constraints if u_opt matches last evaluation
-      u_opt_flat = u_opt.flatten()
-      if _cache_u[0] is not None and np.array_equal(u_opt_flat, _cache_u[0]):
-         traj_opt, vel_opt = _cache_result[0]
-         g = _cache_g[0] if _cache_g[0] is not None else constraints(u_opt_flat)
-      else:
-         traj_opt, vel_opt = self._predict_states(drone, u_opt)
-         g = constraints(u_opt_flat)
-      feasible = result.success and (len(g) == 0 or g.min() >= -self.f_tol)
+         # Reuse cached prediction/constraints if u_opt matches last evaluation
+         u_opt_flat = u_opt.flatten()
+         if _cache_u[0] is not None and np.array_equal(u_opt_flat, _cache_u[0]):
+            traj_opt, vel_opt = _cache_result[0]
+            g = _cache_g[0] if _cache_g[0] is not None else constraints(u_opt_flat)
+         else:
+            traj_opt, vel_opt = self._predict_states(drone, u_opt)
+            g = constraints(u_opt_flat)
+         feasible = result.success and (len(g) == 0 or g.min() >= -self.f_tol)
 
-      # Infeasible fallback: decelerate, then hold position
-      if not feasible:
-         u_opt, traj_opt, vel_opt, feasible = self._infeasible_fallback(drone, u_opt, traj_opt, constraints, u_min, u_max, horizon, )
+         # Infeasible fallback: decelerate, then hold position
+         if not feasible:
+            u_opt, traj_opt, vel_opt, feasible = self._infeasible_fallback(drone, u_opt, traj_opt, constraints, u_min, u_max, horizon, )
 
-      if _log.isEnabledFor(logging.DEBUG):
-         self._debug_log_feasibility_check(drone, neighbor_trajectories, feasible, result, traj_opt, g)
+         if _log.isEnabledFor(logging.DEBUG):
+            self._debug_log_feasibility_check(drone, neighbor_trajectories, feasible, result, traj_opt, g)
 
       return u_opt, traj_opt, feasible, vel_opt
 

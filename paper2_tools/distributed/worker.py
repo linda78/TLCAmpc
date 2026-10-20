@@ -64,7 +64,7 @@ def _run_one_task(v_max: float, u_max: float, room_size: float, alpha: float,
             safety_zone=adaptive_safety_zone if controller == "mpc_agent_adaptive" else static_safety_zone,
         )
 
-        status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, _frames = \
+        status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, _frames, costs = \
             run_single_scenario(scenario=cfg, max_steps=MAX_STEPS, trace_len=TRACE_LEN,
                                 timeout=TIMEOUT_MS, store_gif=False,
                                 deadlock_steps=deadlock_steps, deadlock_min_movement=deadlock_min_movement)
@@ -74,12 +74,14 @@ def _run_one_task(v_max: float, u_max: float, room_size: float, alpha: float,
             num_drones=n_drones, status=status,
             step_durations=step_durations, step_mean_pair_dists=step_mean_pair_dists,
             wall_time=wall_time, coordinator_type=coordinator, controller_type=controller,
-            horizon=HORIZON,
+            horizon=HORIZON, costs=costs,
         )
 
         insert_metrics(task_id, row)
         mark_done(task_id)
-        logger.info("Task %d completed: status=%s, wall_time=%.1fs", task_id, status, wall_time)
+        logger.info("Task %d completed: status=%s, wall_time=%.1fs, cpu=%.1fs (solver %.1f, constraints %.1f, cost %.1f, setup %.1f)",
+                    task_id, status, wall_time, costs["cpu_total_s"], costs["cpu_solver_s"], costs["cpu_constraints_s"], costs["cpu_cost_s"],
+                    costs["cpu_setup_s"])
 
     except DronePlacementError as e:
         logger.exception("Task %d infeasible: %s", task_id, e)
