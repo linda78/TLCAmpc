@@ -27,6 +27,8 @@ class CentralMPCGlobalCoordinator:
    dt: float
    horizon: int = 5
    room_wall_tolerance: float = 0.0
+   terminal_constraint: bool = True  # braking-distance terminal radius at the last horizon step (room walls), see RoomConstraints
+   terminal_constraint_pairs: bool = False  # the same terminal radius for every drone pair at the last step, see MovingObstacleAvoidanceConstraints
 
    # Small acceleration used for warm-start symmetry breaking.
    # Helps SLSQP escape head-on collinear deadlocks where the distance
@@ -45,6 +47,8 @@ class CentralMPCGlobalCoordinator:
          dt=self.dt, horizon=self.horizon, costs=self.costs,
          max_iter=self.max_iter, f_tol=self.f_tol,
          room_wall_tolerance=self.room_wall_tolerance,
+         terminal_constraint=self.terminal_constraint,
+         terminal_constraint_pairs=self.terminal_constraint_pairs,
          symmetry_break_accel=self.symmetry_break_accel,
       )
 

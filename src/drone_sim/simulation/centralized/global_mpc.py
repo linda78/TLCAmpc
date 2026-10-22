@@ -31,6 +31,8 @@ class GlobalMPCSolver:
    max_iter: int = 120
    f_tol: float = 1e-3
    room_wall_tolerance: float = 0.0
+   terminal_constraint: bool = True  # braking-distance terminal radius at the last horizon step (room walls), see RoomConstraints
+   terminal_constraint_pairs: bool = False  # the same terminal radius for every drone pair at the last step, see MovingObstacleAvoidanceConstraints
    symmetry_break_accel: float = 0.05
 
    # Shared CPU-time ledger, see drone_sim.simulation.utils.cpu_costs
@@ -43,9 +45,9 @@ class GlobalMPCSolver:
    _velocity_c: VelocityConstraints = field(init=False, repr=False)
 
    def __post_init__(self) -> None:
-      self._collision_c = MovingObstacleAvoidanceConstraints(horizon=self.horizon)
+      self._collision_c = MovingObstacleAvoidanceConstraints(horizon=self.horizon, terminal_constraint=self.terminal_constraint_pairs)
       self._obstacle_c = ObstacleAvoidanceConstraints(horizon=self.horizon)
-      self._room_c = RoomConstraints(horizon=self.horizon, wall_tolerance=self.room_wall_tolerance)
+      self._room_c = RoomConstraints(horizon=self.horizon, wall_tolerance=self.room_wall_tolerance, terminal_constraint=self.terminal_constraint)
       self._velocity_c = VelocityConstraints(horizon=self.horizon)
 
    def _pack(self, u: np.ndarray) -> np.ndarray:
@@ -117,20 +119,12 @@ class GlobalMPCSolver:
                margins[step] = dist - (si + sj + di.cons_stop + dj.cons_stop)
             collision[f"{di.drone_id} <-> {dj.drone_id}"] = margins
 
-      # Room: one (horizon*6,) array per drone (lower/upper per axis)
+      # Room: one array per drone (horizon*6 per-face margins, plus 6 terminal-radius margins when
+      # enabled), evaluated by the same class the solver uses so the breakdown cannot drift
       room: dict[str, np.ndarray] = {}
       if room_min is not None and room_max is not None:
-         lb = np.asarray(room_min, dtype=float)
-         ub = np.asarray(room_max, dtype=float)
-         for i, d in enumerate(drones):
-            parts = []
-            for step in range(self.horizon):
-               pos = pred_pos[d.drone_id][step]
-               safety = _safety_radius(d, _velocity_at_step(pred_vel[d.drone_id], step))
-               for axis in range(3):
-                  parts.append(pos[axis] - safety - lb[axis] + self.room_wall_tolerance)
-                  parts.append(ub[axis] - (pos[axis] + safety) + self.room_wall_tolerance)
-            room[d.drone_id] = np.array(parts)
+         for d in drones:
+            room[d.drone_id] = self._room_c._evaluate(d, pred_pos[d.drone_id], room_max, room_min, pred_vel=pred_vel[d.drone_id])
 
       # Velocity: one (horizon,) array per drone
       velocity: dict[str, np.ndarray] = {}

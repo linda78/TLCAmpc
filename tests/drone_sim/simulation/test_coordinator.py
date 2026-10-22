@@ -166,3 +166,34 @@ class TestCentralMPCGlobalCoordinatorEdgeCases:
 
       assert "d1" in result
       assert result["d1"].shape == (3,)
+
+
+class TestCentralMPCGlobalCoordinatorTerminalConstraint:
+   """The braking-distance terminal constraint is on by default and switchable per coordinator."""
+
+   def test_default_on_and_handed_to_room_constraints(self):
+      coord = CentralMPCGlobalCoordinator(dt=0.1, horizon=4)
+      assert coord.terminal_constraint is True
+      assert coord._solver.terminal_constraint is True
+      assert coord._solver._room_c._terminal_constraint is True
+
+   def test_switched_off(self):
+      coord = CentralMPCGlobalCoordinator(dt=0.1, horizon=4, terminal_constraint=False)
+      assert coord._solver._room_c._terminal_constraint is False
+
+   def test_switched_off_via_scenario_params(self):
+      from drone_sim.domain.registry import create_coordinator
+      coord = create_coordinator({"type": "mpc_central", "params": {"dt": 0.1, "horizon": 4, "terminal_constraint": False}})
+      assert coord._solver._room_c._terminal_constraint is False
+
+   def test_pairs_off_by_default_and_switchable(self):
+      coord = CentralMPCGlobalCoordinator(dt=0.1, horizon=4)
+      assert coord.terminal_constraint_pairs is False
+      assert coord._solver._collision_c._terminal_constraint is False
+      coord = CentralMPCGlobalCoordinator(dt=0.1, horizon=4, terminal_constraint_pairs=True)
+      assert coord._solver._collision_c._terminal_constraint is True
+
+   def test_pairs_via_scenario_params(self):
+      from drone_sim.domain.registry import create_coordinator
+      coord = create_coordinator({"type": "mpc_central", "params": {"dt": 0.1, "horizon": 4, "terminal_constraint_pairs": True}})
+      assert coord._solver._collision_c._terminal_constraint is True

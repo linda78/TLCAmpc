@@ -12,6 +12,7 @@ def create_scenario(dt: float = 0.1, # simulation & coordinator
                     obstacles: list[dict[str, list[float]]]|None=None,
                     comm_radius: float | None = None, # DMPC neighbourhood: None = every drone is a neighbour of every other
                     max_admm_iter: int = 20, # DMPC rounds per step
+                    terminal_constraint: bool = True, # braking-distance terminal radius at the last horizon step (room walls); False = behaviour of runs before 22.10.2026
                     ) -> ScenarioConfig:
    physics = create_physics(v_max=physics_v, u_max=physics_u)
    if controller_type == "mpc_agent":
@@ -23,9 +24,10 @@ def create_scenario(dt: float = 0.1, # simulation & coordinator
    else:
       raise ValueError("Unknown controller type: %s", controller_type)
    if coordinator_type == "dmpc_admm":
-      coordinator_spec = ControllerSpec(type="dmpc_admm", params={"horizon": horizon, "rho": 1.0, "max_admm_iter": max_admm_iter, "primal_tol": 1e-2, "dual_tol": 1e-2})
+      coordinator_spec = ControllerSpec(type="dmpc_admm", params={"horizon": horizon, "rho": 1.0, "max_admm_iter": max_admm_iter, "primal_tol": 1e-2, "dual_tol": 1e-2,
+                                                                     "terminal_constraint": terminal_constraint})
    elif coordinator_type == "mpc_central":
-      coordinator_spec = ControllerSpec(type="mpc_central", params={"horizon": horizon})
+      coordinator_spec = ControllerSpec(type="mpc_central", params={"horizon": horizon, "terminal_constraint": terminal_constraint})
    else:
       raise ValueError("Unknown coordinator type: %s", coordinator_type)
 

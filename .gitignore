@@ -225,6 +225,11 @@ __marimo__/
 *.pyo
 *.pyd
 *.log
+*.eps
+*.csv
+*.png
+**/*.md
+*.json
 #tools/*
 #paper2_tools/*
 doc/*
@@ -237,3 +242,7 @@ infrastructure/terraform/.terraform.lock.hcl
 infrastructure/terraform/terraform.tfstate
 infrastructure/terraform/terraform.tfstate.backup
 infrastructure/terraform/terraform.tfvars
+
+.planing
+out
+screenshots
