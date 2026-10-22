@@ -21,7 +21,11 @@ class Status(StrEnum):
 
 # CPU-time phases of one run, see drone_sim.simulation.utils.cpu_costs. Each becomes a "cpu_<phase>_s" column.
 COST_PHASES = ("setup", "cost", "constraints", "solver", "validate", "exchange", "admm_update", "physics", "metrics", "deadlock")
-COST_FIELDNAMES = ["cpu_total_s", *(f"cpu_{phase}_s" for phase in COST_PHASES), "admm_iterations", "cost_evals", "constraint_evals"]
+# Per-drone DMPC columns (see CpuCostLedger.add_seconds): number of local solves, their summed inclusive CPU seconds, the summed
+# per-step "slowest drone per round" seconds, and the largest ADMM round count of one step. Zero for the central MPC.
+DMPC_FIELDNAMES = ["local_solves", "local_solve_cpu_s", "parallel_step_cpu_s", "max_admm_iter_step"]
+COST_FIELDNAMES = ["cpu_total_s", *(f"cpu_{phase}_s" for phase in COST_PHASES), "admm_iterations", "cost_evals", "constraint_evals",
+                   *DMPC_FIELDNAMES]
 
 
 def cost_row(ledger: CpuCostLedger, cpu_total_s: float) -> dict[str, float | int]:
@@ -32,6 +36,10 @@ def cost_row(ledger: CpuCostLedger, cpu_total_s: float) -> dict[str, float | int
    row["admm_iterations"] = ledger.counts.get("admm_iterations", 0)
    row["cost_evals"] = ledger.counts.get("cost", 0)
    row["constraint_evals"] = ledger.counts.get("constraints", 0)
+   row["local_solves"] = ledger.counts.get("local_solves", 0)
+   row["local_solve_cpu_s"] = ledger.timings.get("local_solve", 0.0)
+   row["parallel_step_cpu_s"] = ledger.timings.get("parallel_step", 0.0)
+   row["max_admm_iter_step"] = int(ledger.maxima.get("max_admm_iter_step", 0))
    return row
 
 def thread_unsafe_print_results(all_pair_dists: list[float], horizon: int, jerk_3d_value: float, num_drones: int, out_dir: Path, status: Status,
@@ -87,6 +95,9 @@ def print_results_prep(all_pair_dists: list[float], horizon: int, jerk_3d_value:
    if costs:
       phases = ", ".join(f"{phase}={costs.get(f'cpu_{phase}_s', 0.0):.2f}" for phase in COST_PHASES)
       print(f"  cpu: total={costs.get('cpu_total_s', 0.0):.2f}s [{phases}] admm_iterations={costs.get('admm_iterations', 0)}")
+      if costs.get("local_solves"):
+         print(f"  dmpc: local_solves={costs['local_solves']} local_solve_cpu={costs.get('local_solve_cpu_s', 0.0):.2f}s "
+               f"parallel_step_cpu={costs.get('parallel_step_cpu_s', 0.0):.2f}s max_admm_iter_step={costs.get('max_admm_iter_step', 0)}")
 
    fieldnames = ["num_drones", "horizon", "coordinator", "controller_type", "status", "steps", "wall_time_s", "min_step_time_s", "max_step_time_s",
                  "mean_step_time_s", "min_distance", "max_distance", "mean_distance_all_pairs", "mean_distance_step_mean", "jerk_3d_value", *COST_FIELDNAMES]

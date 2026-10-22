@@ -9,13 +9,22 @@ DATABASE_URL_ENV = "DRONESIM_DATABASE_URL"
 COORDINATORS = ['mpc_central', 'dmpc_admm']
 CONTROLLERS = ['mpc_agent', 'mpc_agent_adaptive']
 
+# Experiment names in the scenario_runs queue (create_queue --experiment). The campaigns in the fixed 8 m room (paper 2
+# revision, paper 3 costs) are VOLUME_EXPERIMENT, the constant-density scaling experiment of
+# paper2_tools/review_work/density_scaling is DENSITY_EXPERIMENT. Renaming one means changing it here and running
+# UPDATE scenario_runs SET experiment = '<new>' WHERE experiment = '<old>' on databases that already hold rows.
+VOLUME_EXPERIMENT = "volume"
+DENSITY_EXPERIMENT = "density"
+EXPERIMENTS = (VOLUME_EXPERIMENT, DENSITY_EXPERIMENT)
+
 HORIZON: int = 8
 DT: float = 0.1
 ALPHA: float = 0.5
 
 MAX_STEPS: int = 10000
 TRACE_LEN: int = 10000
-TIMEOUT_MS: int = 86400
+TIMEOUT_MS: int = 86400  # seconds per run, despite the name; a task's timeout_s overrides it
+MAX_ADMM_ITER: int = 20  # DMPC rounds per step of the volume campaigns; a task's max_admm_iter overrides it
 
 # Deadlock check: a run ends with status "deadlock" once every drone moved less than
 # DEADLOCK_MIN_MOVEMENT metres per step for DEADLOCK_STEPS consecutive steps. With DT = 0.1 s

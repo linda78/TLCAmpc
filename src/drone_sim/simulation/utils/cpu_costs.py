@@ -15,6 +15,12 @@ Phases used in the simulation:
 - ``physics``: everything in ``Simulator.step`` outside the coordinator (fallback controls, integration, wall clamping, traces, collisions)
 - ``metrics`` / ``deadlock``: the scenario runner's distance metrics, target check and deadlock check
 
+Besides the exclusive phases the ledger keeps *inclusive* timings and maxima that a caller measures itself, see
+``add_seconds`` and ``record_max``. The DMPC coordinator books every local solve as ``local_solve`` (CPU seconds of one drone's
+optimisation, callbacks included), the per-step sum over the ADMM rounds of the slowest local solve as ``parallel_step`` (the step
+time a fleet with one computer per drone would see) and the largest round count of one step as ``max_admm_iter_step``. They stay
+apart from the phases, so ``total()`` does not count them twice.
+
 The ledger is single-threaded by design: both coordinators used in the campaigns run in the calling thread.
 """
 
@@ -46,6 +52,8 @@ class CpuCostLedger:
    def __init__(self) -> None:
       self.seconds: dict[str, float] = {}
       self.counts: dict[str, int] = {}
+      self.timings: dict[str, float] = {}  # inclusive seconds booked via add_seconds
+      self.maxima: dict[str, float] = {}  # largest values recorded via record_max
       self._stack: list[list] = []  # frames [name, t0, seconds booked to nested phases]
       self._phases: dict[str, _Phase] = {}
 
@@ -59,6 +67,14 @@ class CpuCostLedger:
    def count(self, name: str, n: int = 1) -> None:
       """Add to a plain counter (for example ADMM iterations) without booking time."""
       self.counts[name] = self.counts.get(name, 0) + n
+
+   def add_seconds(self, name: str, seconds: float) -> None:
+      """Book inclusive seconds the caller measured itself, for example one local DMPC solve. Not part of total()."""
+      self.timings[name] = self.timings.get(name, 0.0) + seconds
+
+   def record_max(self, name: str, value: float) -> None:
+      """Keep the largest value seen under ``name``, for example the ADMM rounds of one step."""
+      self.maxima[name] = max(self.maxima.get(name, value), value)
 
    def total(self) -> float:
       """CPU seconds booked across all phases."""

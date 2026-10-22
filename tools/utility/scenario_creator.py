@@ -9,7 +9,9 @@ def create_scenario(dt: float = 0.1, # simulation & coordinator
                     coordinator_type: str = "dmpc_admm", # coordinator TODO add params
                     room_size: float = 5.0, # room TODO add sphere
                     n_drones: int = 4, drones_radius: float = 0.2, safety_zone: float = 1.5, waypoints:list[list[list[float]]]|None=None, # drones TODO, be able to use different controllers and physics
-                    obstacles: list[dict[str, list[float]]]|None=None
+                    obstacles: list[dict[str, list[float]]]|None=None,
+                    comm_radius: float | None = None, # DMPC neighbourhood: None = every drone is a neighbour of every other
+                    max_admm_iter: int = 20, # DMPC rounds per step
                     ) -> ScenarioConfig:
    physics = create_physics(v_max=physics_v, u_max=physics_u)
    if controller_type == "mpc_agent":
@@ -21,7 +23,7 @@ def create_scenario(dt: float = 0.1, # simulation & coordinator
    else:
       raise ValueError("Unknown controller type: %s", controller_type)
    if coordinator_type == "dmpc_admm":
-      coordinator_spec = ControllerSpec(type="dmpc_admm", params={"horizon": horizon, "rho": 1.0, "max_admm_iter": 20, "primal_tol": 1e-2, "dual_tol": 1e-2})
+      coordinator_spec = ControllerSpec(type="dmpc_admm", params={"horizon": horizon, "rho": 1.0, "max_admm_iter": max_admm_iter, "primal_tol": 1e-2, "dual_tol": 1e-2})
    elif coordinator_type == "mpc_central":
       coordinator_spec = ControllerSpec(type="mpc_central", params={"horizon": horizon})
    else:
@@ -35,7 +37,9 @@ def create_scenario(dt: float = 0.1, # simulation & coordinator
 
    if obstacles is not None:
       obstacles = [ObstacleConfig(center=obstacle["center"], half_extents=obstacle["half_extents"]) for obstacle in obstacles]
-   return build_scenario(physics=physics, controller=controller, coordinator=coordinator_spec, comm_radius=None, obstacles=obstacles, room=room, drones=drones, dt=dt)
+   # The central coordinator takes no comm_radius (all pairs are coupled); only the distributed one restricts the neighbourhood.
+   return build_scenario(physics=physics, controller=controller, coordinator=coordinator_spec, comm_radius=comm_radius if coordinator_type == "dmpc_admm" else None,
+                         obstacles=obstacles, room=room, drones=drones, dt=dt)
 
 def build_scenario(physics: PhysicsSpec, controller: ControllerSpec, coordinator: ControllerSpec|None, room: RoomConfig, drones:list[DroneConfig], dt:float=0.1, comm_radius:float|None=None, obstacles:list[ObstacleConfig]|None=None) -> ScenarioConfig:
    return ScenarioConfig(dt=dt, physics=physics, controller=controller, coordinator=coordinator, room=room, drones=drones, comm_radius=comm_radius, obstacles=obstacles if obstacles is not None else [])

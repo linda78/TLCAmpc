@@ -340,12 +340,23 @@ def plot_all_four_deadlock(df: pd.DataFrame, output_dir: Path, n_drones_range: r
          filename_base="deadlock_rate_all4", figsize=figsize, show_title=show_title)
 
 
-def main(metrics_csv: Path | None = None, show_title: bool = True, font_scale: float = 1.0) -> None:
+def main(metrics_csv: Path | None = None, show_title: bool = True, font_scale: float = 1.0,
+         metrics_path: Path | None = None, output_dir: Path | None = None, n_max: int = 24) -> None:
+   """Generate all figures.
+
+   *metrics_csv* selects a result folder below ``paper2_results`` (legacy).
+   *metrics_path* / *output_dir* give explicit paths instead (e.g. review_work).
+   *n_max* is the largest N in the full-range plots (legacy default 24).
+   """
    set_font_scale(font_scale)
-   METRICS_CSV = Path(__file__).resolve().parent / "paper2_results" / "results_hetzner" / "metrics.csv" if metrics_csv is None else Path(
-         __file__).resolve().parent / "paper2_results" / metrics_csv / "metrics.csv"
-   OUTPUT_DIR = Path(__file__).resolve().parent / "paper2_results" / "results_hetzner" / "plots" if metrics_csv is None else Path(
-         __file__).resolve().parent / "paper2_results" / metrics_csv / "plots"
+   if metrics_path is not None:
+      METRICS_CSV = Path(metrics_path).resolve()
+      OUTPUT_DIR = Path(output_dir).resolve() if output_dir is not None else METRICS_CSV.parent / "plots"
+   else:
+      METRICS_CSV = Path(__file__).resolve().parent / "paper2_results" / "results_hetzner" / "metrics.csv" if metrics_csv is None else Path(
+            __file__).resolve().parent / "paper2_results" / metrics_csv / "metrics.csv"
+      OUTPUT_DIR = Path(__file__).resolve().parent / "paper2_results" / "results_hetzner" / "plots" if metrics_csv is None else Path(
+            __file__).resolve().parent / "paper2_results" / metrics_csv / "plots"
 
    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -357,7 +368,7 @@ def main(metrics_csv: Path | None = None, show_title: bool = True, font_scale: f
    print()
 
    n_range = range(2, 12)
-   n_range_all = range(2, 25)
+   n_range_all = range(2, n_max + 1)
 
    plot_coord_and_sphere_combination(df, OUTPUT_DIR, n_drones_range=n_range, field="mean_step_time", show_title=show_title)
    plot_coord_and_sphere_combination(df, OUTPUT_DIR, n_drones_range=n_range, field="arrival", show_title=show_title)
@@ -392,4 +403,16 @@ def main(metrics_csv: Path | None = None, show_title: bool = True, font_scale: f
 
 
 if __name__ == "__main__":
-   main(metrics_csv="results_hetzner", show_title=False, font_scale=2.5)
+   import argparse
+
+   parser = argparse.ArgumentParser(description="Scenario 1.2 figures (deadlock rate, arrival time, step time, scaling)")
+   parser.add_argument("--metrics", type=Path, default=None, help="explicit metrics.csv (default: paper2_results/results_hetzner/metrics.csv)")
+   parser.add_argument("--out", type=Path, default=None, help="output directory (default: <metrics dir>/plots)")
+   parser.add_argument("--n-max", type=int, default=24, help="largest N in the full-range plots (default 24)")
+   parser.add_argument("--font-scale", type=float, default=2.5)
+   parser.add_argument("--show-title", action="store_true")
+   args = parser.parse_args()
+   if args.metrics is not None:
+      main(metrics_path=args.metrics, output_dir=args.out, show_title=args.show_title, font_scale=args.font_scale, n_max=args.n_max)
+   else:
+      main(metrics_csv="results_hetzner", show_title=args.show_title, font_scale=args.font_scale, n_max=args.n_max)

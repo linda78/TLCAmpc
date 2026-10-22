@@ -4,6 +4,7 @@ import logging
 import random
 import warnings
 from dataclasses import dataclass, field
+from time import process_time
 
 import numpy as np
 
@@ -114,7 +115,9 @@ class DistributedMPCCoordinator:
          stagnation_count = 0
 
       iteration = 0
+      parallel_seconds = 0.0  # sum over the rounds of this step of the slowest local solve, see CpuCostLedger
       for iteration in range(self.max_admm_iter):
+         round_max = 0.0
          # Determine drone solving order for this iteration
          with ledger.phase("setup"):
             drone_order = list(opt_ids)
@@ -149,10 +152,11 @@ class DistributedMPCCoordinator:
 
                with ledger.phase("setup"):
                   u_prev = self._warm_start_controls(drone_id, iteration, controls)
-               u_opt, traj_opt, success, vel_opt = solver.solve(
-                  drone=drone, neighbor_trajectories=neighbor_trajectories,
+               (u_opt, traj_opt, success, vel_opt), seconds = self._solve_local(
+                  solver, drone=drone, neighbor_trajectories=neighbor_trajectories,
                   obstacles=obstacles, room_min=room_min, room_max=room_max, u_prev=u_prev,
                )
+               round_max = max(round_max, seconds)
 
                # Immediate update (Gauss-Seidel style)
                trajectories[drone_id] = traj_opt
@@ -166,7 +170,9 @@ class DistributedMPCCoordinator:
                                           neighbor_graph=self._neighbor_graph)
          else:
             # Jacobi: all drones use stale data, update all at once
-            trajectories, controls, velocities = self._jacobi(drone_order, drone_by_id, local_solvers, iteration, obstacles, room_min, room_max, prev_controls=controls)
+            trajectories, controls, velocities, round_max = self._jacobi(drone_order, drone_by_id, local_solvers, iteration, obstacles, room_min, room_max,
+                                                                        prev_controls=controls)
+         parallel_seconds += round_max
 
          with ledger.phase("admm_update"):
             # 3c. Stagnation detection — break early if no drone made progress
@@ -187,6 +193,8 @@ class DistributedMPCCoordinator:
       # Store iteration count for debugging/testing
       self._last_iteration_count = iteration + 1
       ledger.count("admm_iterations", iteration + 1)
+      ledger.add_seconds("parallel_step", parallel_seconds)
+      ledger.record_max("max_admm_iter_step", iteration + 1)
 
       # Record final residuals for debugging/visualization
       with ledger.phase("admm_update"):
@@ -229,15 +237,28 @@ class DistributedMPCCoordinator:
          return self._u_prev[drone_id]
       return None
 
+   def _solve_local(self, solver: LocalMPCSolver, **kwargs) -> tuple[tuple[np.ndarray, np.ndarray, bool, np.ndarray | None], float]:
+      """Run one local MPC solve and book its inclusive CPU seconds as ``local_solve`` (see CpuCostLedger). Returns (result, seconds)."""
+      t0 = process_time()
+      result = solver.solve(**kwargs)
+      seconds = process_time() - t0
+      self.costs.add_seconds("local_solve", seconds)
+      self.costs.count("local_solves")
+      return result, seconds
+
    def _jacobi(self, drone_order: list[str], drone_by_id: dict[str, Drone], local_solvers: dict[str, LocalMPCSolver], iteration: int,
                obstacles: list[tuple[np.ndarray, np.ndarray]] | None = None, room_min: np.ndarray | None = None,
                room_max: np.ndarray | None = None,
-               prev_controls: dict[str, np.ndarray] | None = None) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]:
-      """Jacobi update: all drones solve using stale neighbor data, then update all at once."""
+               prev_controls: dict[str, np.ndarray] | None = None) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray], float]:
+      """Jacobi update: all drones solve using stale neighbor data, then update all at once.
+
+      Returns the new trajectories, controls and velocities plus the CPU seconds of the slowest local solve of this round.
+      """
       ledger = self.costs
       new_trajectories: dict[str, np.ndarray] = {}
       new_controls: dict[str, np.ndarray] = {}
       new_velocities: dict[str, np.ndarray] = {}
+      round_max = 0.0
 
       for drone_id in drone_order:
          drone = drone_by_id[drone_id]
@@ -252,10 +273,11 @@ class DistributedMPCCoordinator:
 
          with ledger.phase("setup"):
             u_prev = self._warm_start_controls(drone_id, iteration, prev_controls or {})
-         u_opt, traj_opt, success, vel_opt = solver.solve(
-            drone=drone, neighbor_trajectories=neighbor_trajectories,
+         (u_opt, traj_opt, success, vel_opt), seconds = self._solve_local(
+            solver, drone=drone, neighbor_trajectories=neighbor_trajectories,
             obstacles=obstacles, room_min=room_min, room_max=room_max, u_prev=u_prev,
          )
+         round_max = max(round_max, seconds)
 
          new_trajectories[drone_id] = traj_opt
          new_controls[drone_id] = u_opt
@@ -268,7 +290,7 @@ class DistributedMPCCoordinator:
                                     predicted_velocities=new_velocities[drone_id], timestamp=0,
                                     neighbor_graph=self._neighbor_graph)
 
-      return new_trajectories, new_controls, new_velocities
+      return new_trajectories, new_controls, new_velocities, round_max
 
    def update_z(self, trajectories: dict[str, np.ndarray], vel_dict: dict[str, np.ndarray | None],
                 all_drones_by_id: dict[str, Drone], neighbor_pairs: list[tuple[str, str]]) -> None:

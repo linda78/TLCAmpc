@@ -80,6 +80,25 @@ class TestCpuCostLedger:
       assert ledger.phase("a") is ledger.phase("a")
       assert ledger.phase("a") is not ledger.phase("b")
 
+   def test_inclusive_timings_stay_apart_from_the_phases(self):
+      ledger = CpuCostLedger()
+
+      ledger.add_seconds("local_solve", 0.5)
+      ledger.add_seconds("local_solve", 0.25)
+
+      assert ledger.timings["local_solve"] == pytest.approx(0.75)
+      assert ledger.total() == 0.0
+      assert "local_solve" not in ledger.seconds
+
+   def test_record_max_keeps_the_largest_value(self):
+      ledger = CpuCostLedger()
+
+      ledger.record_max("max_admm_iter_step", 2)
+      ledger.record_max("max_admm_iter_step", 5)
+      ledger.record_max("max_admm_iter_step", 3)
+
+      assert ledger.maxima["max_admm_iter_step"] == 5
+
 
 def _scenario(coordinator: str, horizon: int = 3) -> ScenarioConfig:
    return ScenarioConfig(
@@ -120,3 +139,30 @@ class TestSimulatorCostWiring:
       if coordinator == "dmpc_admm":
          assert sim.costs.counts["admm_iterations"] >= 3
       assert sim.costs._stack == []
+
+   @pytest.mark.parametrize("gauss_seidel", [True, False])
+   def test_dmpc_books_every_local_solve_and_the_slowest_per_round(self, gauss_seidel):
+      """Test the per-drone columns: one local solve per drone and round, and the fleet step time never exceeds the summed solves."""
+      sim = Simulator.from_config(_scenario("dmpc_admm"))
+      sim.coordinator.gauss_seidel = gauss_seidel
+
+      for _ in range(3):
+         sim.step()
+
+      costs = sim.costs
+      rounds = costs.counts["admm_iterations"]
+      assert costs.counts["local_solves"] == 2 * rounds
+      assert costs.timings["local_solve"] > 0.0
+      assert 0.0 < costs.timings["parallel_step"] <= costs.timings["local_solve"]
+      assert 1 <= costs.maxima["max_admm_iter_step"] <= 5
+      assert costs.maxima["max_admm_iter_step"] <= rounds
+
+   def test_central_mpc_has_no_local_solves(self):
+      sim = Simulator.from_config(_scenario("mpc_central"))
+
+      for _ in range(2):
+         sim.step()
+
+      assert "local_solves" not in sim.costs.counts
+      assert sim.costs.timings == {}
+      assert sim.costs.maxima == {}
