@@ -42,6 +42,8 @@ class DistributedMPCCoordinator:
    comm_radius: float | None = None  # For NeighborGraph
    gauss_seidel: bool = True  # Use Gauss-Seidel updates for symmetry breaking
    stagnation_limit: int = 3  # Break early if no drone makes progress for this many iterations
+   terminal_constraint: bool = True  # braking-distance terminal radius at the last horizon step (room walls), see RoomConstraints
+   terminal_constraint_pairs: bool = False  # the same terminal radius for every drone pair at the last step, see MovingObstacleAvoidanceConstraints
 
    # Shared CPU-time ledger, see drone_sim.simulation.utils.cpu_costs
    costs: CpuCostLedger = field(default_factory=CpuCostLedger, repr=False)
@@ -341,7 +343,8 @@ class DistributedMPCCoordinator:
             continue
 
          # Create local solver for this drone with bounds from physics
-         local_solvers[drone.drone_id] = LocalMPCSolver(dt=self.dt, horizon=self.horizon, costs=self.costs)
+         local_solvers[drone.drone_id] = LocalMPCSolver(dt=self.dt, horizon=self.horizon, costs=self.costs, terminal_constraint=self.terminal_constraint,
+                                                        terminal_constraint_pairs=self.terminal_constraint_pairs)
 
          # Initialize trajectory from warm-start or initial guess
          if drone.drone_id in self._u_prev:

@@ -534,3 +534,46 @@ class TestDistributedMPCCoordinatorAdaptive:
         assert result["d2"].shape == (3,)
         assert np.all(np.isfinite(result["d1"]))
         assert np.all(np.isfinite(result["d2"]))
+
+
+class TestDistributedCoordinatorTerminalConstraint:
+    """The braking-distance terminal constraint is on by default and handed to every local solver."""
+
+    @staticmethod
+    def _drones() -> list[Drone]:
+        return [
+            _make_drone("drone-1", np.zeros(6), np.array([0.0, 0.0, 0.0]), CentralMPCAgent(dt=0.1, horizon=5)),
+            _make_drone("drone-2", np.array([5.0, 0, 0, 0, 0, 0]), np.array([5.0, 0.0, 0.0]), CentralMPCAgent(dt=0.1, horizon=5)),
+        ]
+
+    def test_default_on_in_local_solvers(self):
+        coordinator = DistributedMPCCoordinator(dt=0.1, horizon=5)
+        assert coordinator.terminal_constraint is True
+        _, local_solvers = coordinator.init_trajectories(self._drones())
+        assert len(local_solvers) == 2
+        assert all(solver.terminal_constraint is True for solver in local_solvers.values())
+
+    def test_switched_off_reaches_local_solvers(self):
+        coordinator = DistributedMPCCoordinator(dt=0.1, horizon=5, terminal_constraint=False)
+        _, local_solvers = coordinator.init_trajectories(self._drones())
+        assert all(solver.terminal_constraint is False for solver in local_solvers.values())
+
+    def test_switched_off_via_scenario_params(self):
+        from drone_sim.domain.registry import create_coordinator
+        coordinator = create_coordinator({"type": "dmpc_admm", "params": {"dt": 0.1, "horizon": 5, "terminal_constraint": False}})
+        assert coordinator.terminal_constraint is False
+
+    def test_pairs_off_by_default_and_reach_local_solvers(self):
+        coordinator = DistributedMPCCoordinator(dt=0.1, horizon=5)
+        assert coordinator.terminal_constraint_pairs is False
+        _, local_solvers = coordinator.init_trajectories(self._drones())
+        assert all(solver.terminal_constraint_pairs is False for solver in local_solvers.values())
+
+        coordinator = DistributedMPCCoordinator(dt=0.1, horizon=5, terminal_constraint_pairs=True)
+        _, local_solvers = coordinator.init_trajectories(self._drones())
+        assert all(solver.terminal_constraint_pairs is True for solver in local_solvers.values())
+
+    def test_pairs_via_scenario_params(self):
+        from drone_sim.domain.registry import create_coordinator
+        coordinator = create_coordinator({"type": "dmpc_admm", "params": {"dt": 0.1, "horizon": 5, "terminal_constraint_pairs": True}})
+        assert coordinator.terminal_constraint_pairs is True

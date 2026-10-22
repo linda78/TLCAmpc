@@ -20,6 +20,7 @@ EXPERIMENTS = (VOLUME_EXPERIMENT, DENSITY_EXPERIMENT)
 HORIZON: int = 8
 DT: float = 0.1
 ALPHA: float = 0.5
+TERMINAL_CONSTRAINT: bool = True  # braking-distance terminal radius at the last horizon step (room walls); False reproduces the runs before 22.10.2026
 
 MAX_STEPS: int = 10000
 TRACE_LEN: int = 10000

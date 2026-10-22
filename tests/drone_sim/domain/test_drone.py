@@ -313,3 +313,48 @@ class TestDroneAdaptive:
       # fast: formula ≈ 5.53 > safety_zone → returns 5.53
       r_fast = drone.compute_adaptive_radius(np.array([4.0, 0.0, 0.0]))
       assert r_fast > r_slow
+
+
+class TestDroneTerminalRadius:
+   """Tests for the terminal (braking) safety radius used at the last MPC horizon step."""
+
+   @staticmethod
+   def _adaptive_drone(controller: CentralMPCAgent, route: Route, alpha: float = 0.5) -> Drone:
+      return Drone(
+         drone_id="adaptive-1", radius=0.4, safety_zone=1.0, cons_stop=0.0,
+         color="tab:blue", safety_color="tab:blue", trace_color="tab:blue",
+         controller=controller, physics=LinearKinematicsPhysics(dt=0.1, v_max=2.5),
+         x=np.zeros(6), route=route, alpha=alpha,
+      )
+
+   def test_fixed_drone_adds_braking_allowance_to_fixed_radius(self, sample_drone: Drone):
+      """Static drones (alpha=None, safety_zone=1.0, U_max=3, dt=0.1) use the same formula on top of their fixed radius."""
+      assert sample_drone.is_adaptive is False
+      assert sample_drone.compute_terminal_radius(np.zeros(3)) == pytest.approx(sample_drone.safety_zone)
+      expected = sample_drone.safety_zone + 2.0 ** 2 / 6.0 + 0.5 * 0.1 * 2.0
+      assert sample_drone.compute_terminal_radius(np.array([2.0, 0.0, 0.0])) == pytest.approx(expected)
+
+   def test_at_rest_equals_safety_zone(self, sample_controller: CentralMPCAgent, sample_route: Route):
+      drone = self._adaptive_drone(sample_controller, sample_route)
+      assert drone.compute_terminal_radius(np.zeros(3)) == pytest.approx(1.0)
+
+   def test_formula_full_stopping_distance_plus_half_step(self, sample_controller: CentralMPCAgent, sample_route: Route):
+      """r_term = r_min + ||v||^2 / (2 U_max) + 0.5 * dt * ||v|| with U_max = 3, dt = 0.1."""
+      drone = self._adaptive_drone(sample_controller, sample_route)
+      velocity = np.array([0.0, 2.5, 0.0])
+      expected = 1.0 + 2.5 ** 2 / 6.0 + 0.5 * 0.1 * 2.5  # 1.0 + 1.0417 + 0.125 = 2.1667
+      assert drone.compute_terminal_radius(velocity) == pytest.approx(expected)
+      assert drone.compute_terminal_radius(velocity) == pytest.approx(2.1667, abs=1e-4)
+
+   def test_terminal_radius_exceeds_step_radius(self, sample_controller: CentralMPCAgent, sample_route: Route):
+      """With alpha = 0.5 the step radius covers half the braking distance, the terminal radius all of it."""
+      drone = self._adaptive_drone(sample_controller, sample_route, alpha=0.5)
+      velocity = np.array([2.5, 0.0, 0.0])
+      assert drone.compute_adaptive_radius(velocity) == pytest.approx(1.0 + 0.5 * 2.5 ** 2 / 6.0)
+      assert drone.compute_terminal_radius(velocity) > drone.compute_adaptive_radius(velocity)
+
+   def test_terminal_radius_independent_of_alpha(self, sample_controller: CentralMPCAgent, sample_route: Route):
+      velocity = np.array([1.0, 1.0, 1.0])
+      r_half = self._adaptive_drone(sample_controller, sample_route, alpha=0.5).compute_terminal_radius(velocity)
+      r_big = self._adaptive_drone(sample_controller, sample_route, alpha=1.5).compute_terminal_radius(velocity)
+      assert r_half == pytest.approx(r_big)

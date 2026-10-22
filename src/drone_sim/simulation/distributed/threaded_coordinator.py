@@ -58,6 +58,8 @@ class ThreadedMPCCoordinator:
     max_iterations: int = 100  # Per-drone iteration limit (safety cap)
     convergence_timeout_sec: float = 30.0
     gauss_seidel: bool = False  # Optional staggered spawn
+    terminal_constraint: bool = True  # braking-distance terminal radius at the last horizon step (room walls), see RoomConstraints
+    terminal_constraint_pairs: bool = False  # the same terminal radius for every drone pair at the last step, see MovingObstacleAvoidanceConstraints
 
     # Internal state (initialized in __post_init__)
     _neighbor_graph: NeighborGraph = field(init=False, repr=False)
@@ -110,7 +112,8 @@ class ThreadedMPCCoordinator:
         async_solvers: dict[str, AsyncLocalSolver] = {}
 
         for drone in opt_drones:
-            local_solver = LocalMPCSolver(dt=self.dt, horizon=self.horizon)
+            local_solver = LocalMPCSolver(dt=self.dt, horizon=self.horizon, terminal_constraint=self.terminal_constraint,
+                                          terminal_constraint_pairs=self.terminal_constraint_pairs)
 
             # Pass warm-start from previous timestep if available
             u_prev = self._u_prev.get(drone.drone_id)

@@ -26,8 +26,8 @@ from typing import Any
 
 import numpy as np
 
-from paper2_tools.distributed.config import (HORIZON, DT, ALPHA, MAX_STEPS, TRACE_LEN, TIMEOUT_MS, MAX_ADMM_ITER, DEADLOCK_STEPS,
-                                             DEADLOCK_MIN_MOVEMENT, VOLUME_EXPERIMENT, placement_seed)
+from paper2_tools.distributed.config import (HORIZON, DT, ALPHA, TERMINAL_CONSTRAINT, MAX_STEPS, TRACE_LEN, TIMEOUT_MS, MAX_ADMM_ITER,
+                                             DEADLOCK_STEPS, DEADLOCK_MIN_MOVEMENT, VOLUME_EXPERIMENT, placement_seed)
 from paper2_tools.distributed.db import claim_task, ensure_schema, insert_metrics, mark_done, mark_error, count_by_status
 
 logger = logging.getLogger(__name__)
@@ -104,6 +104,7 @@ def _run_one_task(v_max: float, u_max: float, room_size: float, alpha: float,
             drones_radius=r_min,
             safety_zone=adaptive_safety_zone if controller == "mpc_agent_adaptive" else static_safety_zone,
             comm_radius=settings.comm_radius, max_admm_iter=settings.max_admm_iter,
+            terminal_constraint=TERMINAL_CONSTRAINT,
         )
 
         status, wall_time, jerk_3d_value, step_durations, step_mean_pair_dists, all_pair_dists, _frames, costs = \

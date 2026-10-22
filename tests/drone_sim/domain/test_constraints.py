@@ -1069,3 +1069,260 @@ class TestPerStepNeighborVelocity:
         assert result_none[0] == pytest.approx(4.8)
         # Zero vel => ego safety_zone(0.1) + neighbor adaptive(0.2) = 0.3, margin = 4.7
         assert result_zero[0] == pytest.approx(4.7)
+
+
+# ---------------------------------------------------------------
+# RoomConstraints -- terminal (braking) radius at the last horizon step
+# ---------------------------------------------------------------
+
+def _terminal_radius(safety_zone: float, speed: float, u_max: float = 3.0, dt: float = 0.1) -> float:
+    """Reference formula: r_term = r_min + ||v||^2 / (2 U_max) + 0.5 * dt * ||v||."""
+    return safety_zone + speed ** 2 / (2.0 * u_max) + 0.5 * dt * speed
+
+
+class TestRoomConstraintsTerminalRadius:
+    """The last horizon step gets an additional constraint with the terminal radius.
+
+    Paper 2 revision parameters: r_min = 1.0, alpha = 0.5, U_max = 3.0, dt = 0.1, V_max = 2.5.
+    At V_max the step radius is 1.0 + 0.5 * 1.0417 = 1.52 m, the terminal radius is
+    1.0 + 1.0417 + 0.125 = 2.1667 m (full stopping distance plus half a sampling step).
+    Row layout for a box room: 6 per-face rows per step [lower xyz, upper xyz], then 6 terminal rows.
+    """
+
+    ROOM_MIN = np.array([-5.0, -5.0, -5.0])
+    ROOM_MAX = np.array([5.0, 5.0, 5.0])
+
+    def test_box_appends_six_terminal_rows(self):
+        """Step rows stay unchanged, six extra rows use the terminal radius of the last step."""
+        horizon = 3
+        constraints = RoomConstraints(horizon=horizon)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5, v_max=2.5)
+        pred_pos = np.zeros((horizon, 3))
+        pred_vel = np.zeros((horizon, 3))
+        pred_vel[-1] = [2.5, 0.0, 0.0]
+
+        result = constraints.evaluate_single(drone, pred_pos, self.ROOM_MAX, self.ROOM_MIN, np.array([]), pred_vel=pred_vel)
+
+        assert result.shape == (6 * horizon + 6,)
+        step_radius = 1.0 + 0.5 * 2.5 ** 2 / 6.0  # 1.52
+        assert np.all(result[12:18] == pytest.approx(5.0 - step_radius))
+        expected = 5.0 - _terminal_radius(1.0, 2.5)
+        assert np.all(result[18:] == pytest.approx(expected))
+        assert expected == pytest.approx(5.0 - 2.1667, abs=1e-3)
+
+    def test_terminal_rows_use_last_step_only(self):
+        """Velocity at earlier steps does not influence the terminal rows."""
+        horizon = 2
+        constraints = RoomConstraints(horizon=horizon)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5)
+        pred_pos = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        pred_vel = np.array([[2.5, 0.0, 0.0], [0.0, 0.0, 0.0]])
+
+        result = constraints.evaluate_single(drone, pred_pos, self.ROOM_MAX, self.ROOM_MIN, np.array([]), pred_vel=pred_vel)
+
+        terminal = result[12:]
+        # At rest the terminal radius equals r_min = 1.0: lower x = 1 - 1 + 5, upper x = 5 - (1 + 1)
+        assert terminal[0] == pytest.approx(5.0)
+        assert terminal[3] == pytest.approx(3.0)
+
+    def test_wall_tolerance_applies_to_terminal_rows(self):
+        constraints = RoomConstraints(horizon=1, wall_tolerance=0.25)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5)
+        pred_vel = np.array([[2.5, 0.0, 0.0]])
+
+        result = constraints.evaluate_single(drone, np.zeros((1, 3)), self.ROOM_MAX, self.ROOM_MIN, np.array([]), pred_vel=pred_vel)
+
+        assert np.all(result[6:] == pytest.approx(5.0 - _terminal_radius(1.0, 2.5) + 0.25))
+
+    def test_wall_example_from_paper(self):
+        """A plan ending 1.52 m before the wall at V_max violates the terminal constraint, 2.17 m satisfies it."""
+        constraints = RoomConstraints(horizon=1)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5, v_max=2.5)
+        room_min = np.zeros(3)
+        room_max = np.full(3, 8.0)
+        pred_vel = np.array([[2.5, 0.0, 0.0]])  # flying head-on towards the x = 8 wall
+
+        at_step_radius = constraints.evaluate_single(drone, np.array([[8.0 - 1.52, 4.0, 4.0]]), room_max, room_min, np.array([]), pred_vel=pred_vel)
+        assert at_step_radius[3] == pytest.approx(0.0, abs=1e-2)  # step constraint on the upper x face is tight
+        assert at_step_radius[9] < -0.6  # terminal constraint violated by about 0.65 m
+
+        at_terminal_radius = constraints.evaluate_single(drone, np.array([[8.0 - 2.1667, 4.0, 4.0]]), room_max, room_min, np.array([]), pred_vel=pred_vel)
+        assert at_terminal_radius[9] == pytest.approx(0.0, abs=1e-3)
+        assert np.all(at_terminal_radius >= -1e-3)
+
+    def test_full_braking_keeps_terminal_constraint_feasible(self):
+        """Recursive feasibility: a state on the terminal constraint, extended by a full-braking step,
+        satisfies the terminal constraint again (the shifted-plan-plus-brake candidate of Proposition V.6)."""
+        dt, u_max, speed = 0.1, 3.0, 2.5
+        physics = LinearKinematicsPhysics(dt=dt, v_max=speed)
+        constraints = RoomConstraints(horizon=1)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5, v_max=speed)
+        room_min = np.zeros(3)
+        room_max = np.full(3, 8.0)
+        direction = np.array([1.0, 1.0, 0.0]) / np.sqrt(2.0)  # diagonal towards the x = 8 and y = 8 walls
+        r_term = _terminal_radius(1.0, speed)
+        x = np.array([8.0 - r_term, 8.0 - r_term, 4.0, *(speed * direction)])
+
+        steps = 0
+        while np.linalg.norm(x[3:]) > 1e-12:
+            g = constraints.evaluate_single(drone, x[:3].reshape(1, 3), room_max, room_min, np.array([]), pred_vel=x[3:].reshape(1, 3))
+            assert g.min() >= -1e-9, f"terminal constraint violated after {steps} braking steps: {g}"
+            v = x[3:]
+            u = -v / np.linalg.norm(v) * min(u_max, np.linalg.norm(v) / dt)
+            x = physics.step(x, u)
+            steps += 1
+
+        # The drone comes to a standstill with r_min clearance to both walls
+        assert steps == 9
+        assert np.all(8.0 - x[:2] >= 1.0 - 1e-9)
+
+    def test_fixed_radius_drone_gets_terminal_rows_on_its_fixed_radius(self):
+        """Static drones keep their fixed step radius r_s and get the same braking allowance on top at the last step."""
+        horizon = 2
+        constraints = RoomConstraints(horizon=horizon)
+        drone = _make_drone(safety_zone=1.52)
+        pred_vel = np.zeros((horizon, 3))
+        pred_vel[-1] = [2.5, 0.0, 0.0]
+
+        result = constraints.evaluate_single(drone, np.zeros((horizon, 3)), self.ROOM_MAX, self.ROOM_MIN, np.array([]), pred_vel=pred_vel)
+
+        assert result.shape == (6 * horizon + 6,)
+        assert np.all(result[: 6 * horizon] == pytest.approx(5.0 - 1.52))  # step rows ignore the velocity
+        assert np.all(result[6 * horizon:] == pytest.approx(5.0 - _terminal_radius(1.52, 2.5)))  # 5 - 2.6867
+
+    def test_no_terminal_rows_without_velocities(self):
+        horizon = 2
+        constraints = RoomConstraints(horizon=horizon)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5)
+
+        result = constraints.evaluate_single(drone, np.zeros((horizon, 3)), self.ROOM_MAX, self.ROOM_MIN, np.array([]))
+
+        assert result.shape == (6 * horizon,)
+
+    def test_terminal_constraint_can_be_disabled(self):
+        horizon = 2
+        drone = _make_drone(safety_zone=1.0, alpha=0.5)
+        pred_pos = np.zeros((horizon, 3))
+        pred_vel = np.full((horizon, 3), 1.0)
+
+        with_terminal = RoomConstraints(horizon=horizon).evaluate_single(drone, pred_pos, self.ROOM_MAX, self.ROOM_MIN, np.array([]), pred_vel=pred_vel)
+        without = RoomConstraints(horizon=horizon, terminal_constraint=False).evaluate_single(drone, pred_pos, self.ROOM_MAX, self.ROOM_MIN, np.array([]), pred_vel=pred_vel)
+
+        assert without.shape == (6 * horizon,)
+        assert_array_almost_equal(without, with_terminal[: 6 * horizon])
+
+    def test_sphere_appends_one_terminal_row(self):
+        horizon = 2
+        constraints = RoomConstraints(horizon=horizon)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5)
+        pred_pos = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]])
+        pred_vel = np.zeros((horizon, 3))
+        pred_vel[-1] = [0.0, 2.5, 0.0]
+
+        result = constraints.evaluate_single(drone, pred_pos, 5.0, None, np.array([]), room_is_sphere=True, pred_vel=pred_vel)
+
+        assert result.shape == (horizon + 1,)
+        assert result[-1] == pytest.approx(5.0 - 1.0 - _terminal_radius(1.0, 2.5))
+
+    def test_evaluate_multi_mixed_drones(self):
+        """Adaptive and fixed-radius drones both contribute 6H + 6 rows."""
+        horizon = 2
+        constraints = RoomConstraints(horizon=horizon)
+        adaptive = _make_drone("a", safety_zone=1.0, alpha=0.5)
+        fixed = _make_drone("f", safety_zone=1.52)
+        pred_pos = {"a": np.zeros((horizon, 3)), "f": np.zeros((horizon, 3))}
+        pred_vel = {"a": np.full((horizon, 3), 1.0), "f": np.full((horizon, 3), 1.0)}
+
+        result = constraints.evaluate_multi([adaptive, fixed], pred_pos, self.ROOM_MAX, self.ROOM_MIN, np.array([]), pred_vel=pred_vel)
+
+        assert result.shape == (2 * (6 * horizon + 6),)
+
+
+# ---------------------------------------------------------------
+# MovingObstacleAvoidanceConstraints -- terminal (braking) radius for drone pairs
+# ---------------------------------------------------------------
+
+class TestMovingObstacleTerminalRadius:
+    """With terminal_constraint=True (coordinator parameter terminal_constraint_pairs) every pair gets one additional row
+    for the last horizon step with the terminal radii of both drones. Off by default; row layout per pair: H step rows,
+    then the terminal row."""
+
+    def test_off_by_default(self):
+        horizon = 3
+        drone = _make_drone(safety_zone=1.0, alpha=0.5, v_max=2.5)
+        neighbors = {"n1": (np.tile([5.0, 0.0, 0.0], (horizon, 1)), np.zeros((horizon, 3)))}
+
+        result = MovingObstacleAvoidanceConstraints(horizon=horizon).evaluate_single(drone, np.zeros((horizon, 3)), neighbors, np.array([]),
+                                                                                     pred_vel=np.zeros((horizon, 3)))
+
+        assert result.shape == (horizon,)
+
+    def test_single_appends_one_row_per_neighbor(self):
+        horizon = 3
+        constraints = MovingObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=True)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5, v_max=2.5)
+        pred_vel = np.zeros((horizon, 3))
+        pred_vel[-1] = [2.5, 0.0, 0.0]
+        nbr_vel = np.zeros((horizon, 3))
+        nbr_vel[-1] = [0.0, 1.0, 0.0]
+        neighbors = {"n1": (np.tile([5.0, 0.0, 0.0], (horizon, 1)), nbr_vel), "n2": (np.tile([0.0, 6.0, 0.0], (horizon, 1)), None)}
+
+        result = constraints.evaluate_single(drone, np.zeros((horizon, 3)), neighbors, np.array([]), pred_vel=pred_vel)
+
+        assert result.shape == (2 * (horizon + 1),)
+        # n1: the last step row keeps the step radii (ego 1.52 at V_max, neighbour 1.0833 at 1 m/s), the terminal row uses both terminal radii
+        assert result[horizon - 1] == pytest.approx(5.0 - (1.0 + 0.5 * 2.5 ** 2 / 6.0) - (1.0 + 0.5 * 1.0 / 6.0))
+        assert result[horizon] == pytest.approx(5.0 - _terminal_radius(1.0, 2.5) - _terminal_radius(1.0, 1.0))
+        # n2 without velocities: its last step radius r_min stands in for its terminal radius
+        assert result[2 * horizon + 1] == pytest.approx(6.0 - _terminal_radius(1.0, 2.5) - 1.0)
+
+    def test_single_static_ego_gets_braking_allowance_on_fixed_radius(self):
+        horizon = 2
+        constraints = MovingObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=True)
+        drone = _make_drone(safety_zone=1.52, v_max=2.5)
+        pred_vel = np.zeros((horizon, 3))
+        pred_vel[-1] = [2.5, 0.0, 0.0]
+        neighbors = {"n1": (np.tile([6.0, 0.0, 0.0], (horizon, 1)), np.zeros((horizon, 3)))}
+
+        result = constraints.evaluate_single(drone, np.zeros((horizon, 3)), neighbors, np.array([]), pred_vel=pred_vel)
+
+        assert result.shape == (horizon + 1,)
+        assert np.all(result[:horizon] == pytest.approx(6.0 - 2 * 1.52))
+        assert result[horizon] == pytest.approx(6.0 - _terminal_radius(1.52, 2.5) - 1.52)
+
+    def test_no_terminal_rows_without_ego_velocities(self):
+        horizon = 2
+        constraints = MovingObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=True)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5)
+        neighbors = {"n1": (np.tile([5.0, 0.0, 0.0], (horizon, 1)), np.zeros((horizon, 3)))}
+
+        result = constraints.evaluate_single(drone, np.zeros((horizon, 3)), neighbors, np.array([]))
+
+        assert result.shape == (horizon,)
+
+    def test_multi_appends_one_row_per_pair_with_cons_stop(self):
+        horizon = 2
+        constraints = MovingObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=True)
+        d1 = _make_drone("d1", safety_zone=1.0, alpha=0.5, v_max=2.5, cons_stop=0.1)
+        d2 = _make_drone("d2", x=np.array([4.0, 0, 0, 0, 0, 0]), safety_zone=1.52, cons_stop=0.2)  # static
+        d3 = _make_drone("d3", x=np.array([0, 8.0, 0, 0, 0, 0]), safety_zone=1.0, alpha=0.5)
+        pred_pos = {"d1": np.zeros((horizon, 3)), "d2": np.tile([4.0, 0.0, 0.0], (horizon, 1)), "d3": np.tile([0.0, 8.0, 0.0], (horizon, 1))}
+        pred_vel = {"d1": np.array([[0.0, 0.0, 0.0], [2.5, 0.0, 0.0]]), "d2": np.array([[0.0, 0.0, 0.0], [0.0, 2.5, 0.0]]), "d3": np.zeros((horizon, 3))}
+
+        result = constraints.evaluate_multi([d1, d2, d3], pred_pos, np.array([]), pred_vel=pred_vel)
+
+        assert result.shape == (3 * (horizon + 1),)
+        assert result[horizon] == pytest.approx(4.0 - _terminal_radius(1.0, 2.5) - _terminal_radius(1.52, 2.5) - 0.3)  # (d1, d2)
+        assert result[2 * horizon + 1] == pytest.approx(8.0 - _terminal_radius(1.0, 2.5) - 1.0 - 0.1)  # (d1, d3), d3 at rest
+        assert result[3 * horizon + 2] == pytest.approx(np.sqrt(4.0 ** 2 + 8.0 ** 2) - _terminal_radius(1.52, 2.5) - 1.0 - 0.2)  # (d2, d3)
+
+    def test_multi_without_velocities_has_no_terminal_rows(self):
+        horizon = 2
+        constraints = MovingObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=True)
+        d1 = _make_drone("d1", safety_zone=1.0, alpha=0.5)
+        d2 = _make_drone("d2", x=np.array([4.0, 0, 0, 0, 0, 0]), safety_zone=1.0, alpha=0.5)
+        pred_pos = {"d1": np.zeros((horizon, 3)), "d2": np.tile([4.0, 0.0, 0.0], (horizon, 1))}
+
+        result = constraints.evaluate_multi([d1, d2], pred_pos, np.array([]))
+
+        assert result.shape == (horizon,)

@@ -131,6 +131,20 @@ class VelocityConstraints(MPCConstraints):
 
 
 class MovingObstacleAvoidanceConstraints(MPCConstraints):
+   """Pairwise collision avoidance: at every horizon step the distance of two drones must exceed the sum of their safety radii.
+
+   With ``terminal_constraint`` (default off, coordinator parameter ``terminal_constraint_pairs``) every pair gets one
+   additional row for the last horizon step that uses the terminal radius ``Drone.compute_terminal_radius`` (base radius
+   plus the full stopping distance plus half a sampling step) of both drones instead of the step radii, the pair
+   counterpart of the wall rows in ``RoomConstraints``. The row is appended after the H step rows of that pair. Calls
+   without velocities get no terminal rows. In the single-drone form the neighbour's terminal radius is computed with the
+   ego drone's parameters ("same drone type"); a neighbour without velocities keeps its last step radius.
+   """
+
+   def __init__(self, horizon: int, terminal_constraint: bool = False):
+      super().__init__(horizon)
+      self._terminal_constraint = terminal_constraint
+
    def label(self) -> str:
       return "moving_obstacle_avoidance"
 
@@ -190,7 +204,12 @@ class MovingObstacleAvoidanceConstraints(MPCConstraints):
             dists = np.linalg.norm(traj_i - traj_j, axis=1)
             radii_i = _safety_radii(drone_i, vel_i, self._horizon)
             radii_j = _safety_radii(drone_j, vel_j, self._horizon)
-            result = dists - (radii_i + radii_j + drone_i.cons_stop + drone_j.cons_stop)
+            cons_stop = drone_i.cons_stop + drone_j.cons_stop
+            result = dists - (radii_i + radii_j + cons_stop)
+            if self._terminal_constraint and vel_i is not None and vel_j is not None:
+               last = self._horizon - 1
+               r_term = drone_i.compute_terminal_radius(vel_i[last]) + drone_j.compute_terminal_radius(vel_j[last])
+               result = np.append(result, dists[last] - (r_term + cons_stop))
             parts.append(result)
       return np.concatenate([values, *parts])
 
@@ -213,14 +232,20 @@ class MovingObstacleAvoidanceConstraints(MPCConstraints):
       :return: constraint margin array.
       """
       parts = []
+      last = self._horizon - 1
       ego_radii = _safety_radii(drone, pred_vel, self._horizon)
       # For non-adaptive drones, all radii are identical — compute once
       fixed_radii = None if drone.is_adaptive else ego_radii
+      r_term_ego = drone.compute_terminal_radius(pred_vel[last]) if self._terminal_constraint and pred_vel is not None else None
       for neighbor_traj, neighbor_vel in neighbor_trajectories.values():
          neighbor_traj = np.asarray(neighbor_traj, dtype=float).reshape((self._horizon, 3))
          dists = np.linalg.norm(pred_pos - neighbor_traj, axis=1)
          neighbor_radii = fixed_radii if fixed_radii is not None else _safety_radii(drone, neighbor_vel, self._horizon)
          result = dists - (ego_radii + neighbor_radii)
+         if r_term_ego is not None:
+            # neighbour terminal radius with the ego parameters ("same drone type"); without velocities its last step radius
+            r_term_nbr = drone.compute_terminal_radius(np.asarray(neighbor_vel, dtype=float)[last]) if neighbor_vel is not None else neighbor_radii[last]
+            result = np.append(result, dists[last] - (r_term_ego + r_term_nbr))
          parts.append(result)
       if not parts:
          return np.zeros(0)
@@ -309,12 +334,30 @@ class ObstacleAvoidanceConstraints(MPCConstraints):
 
 
 class RoomConstraints(MPCConstraints):
-   def __init__(self, horizon: int, wall_tolerance: float = 0.0):
+   """Room boundary constraints: the safety sphere of every horizon step must lie inside the room.
+
+   With ``terminal_constraint`` (default on, switchable through the coordinator parameter of the same
+   name) every drone gets one additional constraint for the last horizon step: there the sphere uses
+   the terminal radius ``Drone.compute_terminal_radius`` (base radius plus the full stopping distance
+   plus half a sampling step) instead of the step radius. The step constraints stay untouched, the
+   terminal rows are appended after them (6 rows for a box room, 1 row for a sphere room). This
+   guarantees that braking to a standstill is a feasible continuation of any plan, so the MPC problem
+   stays feasible at the walls. Calls without ``pred_vel`` get no terminal rows.
+   """
+
+   def __init__(self, horizon: int, wall_tolerance: float = 0.0, terminal_constraint: bool = True):
       super().__init__(horizon)
       self._wall_tolerance = wall_tolerance
+      self._terminal_constraint = terminal_constraint
 
    def label(self) -> str:
       return "room"
+
+   def _terminal_radius(self, drone: Drone, pred_vel: np.ndarray | None) -> float | None:
+      """Terminal radius for the last horizon step, or ``None`` when no terminal constraint applies."""
+      if not self._terminal_constraint or pred_vel is None:
+         return None
+      return drone.compute_terminal_radius(pred_vel[self._horizon - 1])
 
    def evaluate_single(
       self,
@@ -404,7 +447,17 @@ class RoomConstraints(MPCConstraints):
       result[3::6] = upper_part[:, 0]
       result[4::6] = upper_part[:, 1]
       result[5::6] = upper_part[:, 2]
-      return result
+
+      r_term = self._terminal_radius(drone, pred_vel)
+      if r_term is None:
+         return result
+      # Terminal constraint: the sphere with the full braking radius at the last step lies inside the room
+      p_last = pred_pos[self._horizon - 1]
+      terminal = np.concatenate([
+         p_last - r_term - lower_bounds + self._wall_tolerance,
+         upper_bounds - (p_last + r_term) + self._wall_tolerance,
+      ])
+      return np.concatenate([result, terminal])
 
    def _evaluate_sphere(
       self,
@@ -415,4 +468,8 @@ class RoomConstraints(MPCConstraints):
    ) -> np.ndarray:
       dists = np.linalg.norm(pred_pos[:self._horizon], axis=1)
       radii = _safety_radii(drone, pred_vel, self._horizon)
-      return room_radius - dists - radii
+      result = room_radius - dists - radii
+      r_term = self._terminal_radius(drone, pred_vel)
+      if r_term is None:
+         return result
+      return np.append(result, room_radius - dists[-1] - r_term)

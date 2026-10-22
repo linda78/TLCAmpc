@@ -57,7 +57,7 @@ class Drone:
    # safety radius instead of the fixed safety_zone.
    alpha: float | None = None
 
-   # Cached u_max_scalar for adaptive radius computation (set lazily)
+   # Cached u_max_scalar for the stopping distance (adaptive and terminal radius, set lazily)
    _cached_u_max_scalar: float | None = field(default=None, init=False, repr=False)
 
    @property
@@ -88,18 +88,41 @@ class Drone:
          return self.safety_zone
       return self._compute_adaptive_radius_impl(self.v_max)
 
+   def compute_terminal_radius(self, velocity: np.ndarray) -> float:
+      """Compute the safety radius for the last step of the MPC horizon.
+
+      The step radius ``r_min + alpha * s_stop`` is enough inside the horizon, where the
+      planner still sees and resolves conflicts. At the last step nothing beyond the
+      horizon is checked, so the sphere there has to contain the full stopping distance
+      plus the distance travelled during half a sampling step:
+
+          r_term = r_min + ||v||^2 / (2 U_max) + 0.5 * dt * ||v||
+
+      With this terminal radius "brake to a standstill" is always a feasible continuation
+      of the current plan, which keeps the next MPC problem feasible. The base radius is
+      ``safety_zone`` for every drone: r_min for adaptive drones, the fixed radius r_s for
+      static drones. Both get the same braking allowance on top.
+
+      :param velocity: 3D velocity vector [vx, vy, vz] at the last horizon step.
+      :return: terminal safety radius.
+      """
+      speed = float(np.linalg.norm(velocity))
+      return self.safety_zone + self._stopping_distance(speed) + 0.5 * self.physics.dt * speed
+
+   def _stopping_distance(self, speed: float) -> float:
+      """Minimum stopping distance s_stop = ||v||^2 / (2 U_max) under maximum deceleration."""
+      if self._cached_u_max_scalar is None:
+         _, u_max = self.bounds()
+         self._cached_u_max_scalar = float(np.max(np.abs(u_max)))
+      return speed * speed / (2.0 * self._cached_u_max_scalar)
+
    def _compute_adaptive_radius_impl(self, speed: float) -> float:
       """Compute adaptive radius from the speed (velocity magnitude).
 
       :param speed: scalar speed (norm of velocity vector).
       :return: adaptive safety radius.
       """
-      if self._cached_u_max_scalar is None:
-         _, u_max = self.bounds()
-         self._cached_u_max_scalar = float(np.max(np.abs(u_max)))
-      v_norm_sq = speed * speed
-      s_stop = v_norm_sq / (2.0 * self._cached_u_max_scalar)
-      return self.safety_zone + self.alpha * s_stop
+      return self.safety_zone + self.alpha * self._stopping_distance(speed)
 
    def predict(self, u: np.ndarray) -> np.ndarray:
       return self.physics.step(self.x, u)
