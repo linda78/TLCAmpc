@@ -203,16 +203,21 @@ def generate_positions(n_drones: int, room_min: list[float] = list, room_max: li
 
 
 def predefined_patterns_for(n_drones: int, r_sphere: float, room_size: float, in_sphere: bool = False) -> StartDestPattern | None:
-   """Look up predefined patterns for common configurations."""
+   """Look up predefined patterns for common configurations.
+
+   The room has to match the pattern's room (tolerance 0.01 m, both ways), while a pattern made for a larger sphere also
+   fits a smaller one, so the sphere check is one-sided. Before 23.10.2026 the room checks were one-sided too, so a smaller
+   room took the pattern of a larger one (the 8 m room with r = 1.52 got the 9 m pattern, whose positions lie in the wall margin).
+   """
    if in_sphere:
-      if room_size - 3.1 < 0.01 and r_sphere - 1.0 < 0.1:
+      if abs(room_size - 3.1) < 0.01 and r_sphere - 1.0 < 0.1:
          return constants.PREDEFINED_POSITIONS_IN_SPHERE_3_1.get(n_drones)
    else:
-      if room_size - 8.0 < 0.01 and r_sphere - 1.0 < 0.1:
+      if abs(room_size - 8.0) < 0.01 and r_sphere - 1.0 < 0.1:
          return constants.PREDEFINED_PATTERNS_IN_BOX_8.get(n_drones)
-      if room_size - 5.0 < 0.01 and r_sphere - 1.0 < 0.1:
+      if abs(room_size - 5.0) < 0.01 and r_sphere - 1.0 < 0.1:
          return constants.PREDEFINED_PATTERNS_IN_BOX_5.get(n_drones)
-      if room_size - 9.0 < 0.01 and r_sphere - 1.5 < 0.1:
+      if abs(room_size - 9.0) < 0.01 and r_sphere - 1.5 < 0.1:
          return constants.PREDEFINED_POSITIONS_IN_BOX_9_R_1_5.get(n_drones)
    return None
 
