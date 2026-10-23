@@ -8,6 +8,7 @@ empty variant; the constant-density scaling experiment (paper2_tools/review_work
 
 from __future__ import annotations
 
+import numbers
 import socket
 from typing import Any
 
@@ -124,6 +125,8 @@ _BASE_METRIC_COLUMNS = [
 _METRIC_COLUMNS = _BASE_METRIC_COLUMNS + [name for name, _ in _COST_COLUMNS]
 _TASK_PARAM_NAMES = [name for name, _ in _TASK_PARAM_COLUMNS]
 _TASK_COLUMNS = ["run_index", "n_drones", "coordinator", "controller", "experiment", "variant", "room_size", "comm_radius", "max_admm_iter", "timeout_s"]
+_INSERT_PAGE_SIZE = 500  # task rows per INSERT statement, for execute_values and for the SQL script alike
+_COUNT_BY_STATUS_SQL = "SELECT status, count(*) FROM scenario_runs{where} GROUP BY status ORDER BY status"
 
 
 def get_connection():
@@ -167,9 +170,43 @@ def insert_tasks(tasks: list[dict[str, Any]]) -> int:
     template = "(" + ", ".join(f"%({name})s" for name in _TASK_COLUMNS) + ")"
     with get_connection() as conn:
         with conn.cursor() as cur:
-            inserted = psycopg2.extras.execute_values(cur, sql, tasks, template=template, page_size=500, fetch=True)
+            inserted = psycopg2.extras.execute_values(cur, sql, tasks, template=template, page_size=_INSERT_PAGE_SIZE, fetch=True)
         conn.commit()
     return len(inserted)
+
+
+def sql_literal(value: Any) -> str:
+    """Render one task value as a PostgreSQL literal for a script that runs in the database console.
+
+    NULL, integers, floats and single-quoted strings (quotes doubled) are all the task columns need; anything else is an error
+    rather than a silently wrong script.
+    """
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, numbers.Integral):
+        return str(int(value))
+    if isinstance(value, numbers.Real):
+        return repr(float(value))
+    if isinstance(value, str):
+        return "'" + value.replace("'", "''") + "'"
+    raise TypeError(f"no SQL literal for {type(value).__name__}: {value!r}")
+
+
+def insert_tasks_sql(tasks: list[dict[str, Any]]) -> str:
+    """The INSERT statements insert_tasks would run, as literal SQL for the database console.
+
+    Same columns, same page size and the same ON CONFLICT clause, so a script and a direct insert leave the queue identical.
+    Empty string for no tasks.
+    """
+    columns = ", ".join(_TASK_COLUMNS)
+    statements = []
+    for start in range(0, len(tasks), _INSERT_PAGE_SIZE):
+        rows = ",\n".join("    (" + ", ".join(sql_literal(task[name]) for name in _TASK_COLUMNS) + ")"
+                          for task in tasks[start:start + _INSERT_PAGE_SIZE])
+        statements.append(f"INSERT INTO scenario_runs ({columns})\nVALUES\n{rows}\nON CONFLICT ON CONSTRAINT {TASK_KEY_CONSTRAINT} DO NOTHING;")
+    return "\n\n".join(statements)
 
 
 def insert_runs(runs: range, drones: range, coordinators: list[str], controllers: list[str]) -> int:
@@ -278,12 +315,16 @@ def mark_error(scenario_run_id: int, message: str) -> None:
 # ---------------------------------------------------------------------------
 
 def count_by_status(experiment: str | None = None) -> dict[str, int]:
-    where = "" if experiment is None else " WHERE experiment = %s"
-    sql = f"SELECT status, count(*) FROM scenario_runs{where} GROUP BY status ORDER BY status"
+    sql = _COUNT_BY_STATUS_SQL.format(where="" if experiment is None else " WHERE experiment = %s")
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, () if experiment is None else (experiment,))
             return {row[0]: row[1] for row in cur.fetchall()}
+
+
+def count_by_status_sql(experiment: str | None = None) -> str:
+    """The query behind count_by_status as literal SQL, for the end of a console script."""
+    return _COUNT_BY_STATUS_SQL.format(where="" if experiment is None else f" WHERE experiment = {sql_literal(experiment)}") + ";"
 
 
 # ---------------------------------------------------------------------------
