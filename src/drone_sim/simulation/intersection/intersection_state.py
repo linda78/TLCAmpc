@@ -53,12 +53,27 @@ class IntersectionStateStore:
    :param margin: Anti-flapping factor for the dissolution check: the
           priority drone must be at least ``radius * margin`` away from the
           sphere center before the sphere is dropped.
+   :param goal_radius: Goal guard for sphere creation. No sphere is inserted
+          whose priority drone is within this distance of its final route
+          target — it is about to stop there, would never exit the sphere and
+          the loser would wait forever. ``None`` means ``radius * margin``
+          (the exit distance of the dissolution check).
+   :param goal_tolerance: A sphere whose priority drone is within this
+          distance of its final target counts as resolved and is dropped
+          (losers released) even if the priority never exited the sphere.
    """
 
    radius: float
    margin: float = 1.1
+   goal_radius: float | None = None
+   goal_tolerance: float = 0.1
    _active: dict[frozenset[str], SphereRecord] = field(default_factory=dict)
    _step: int = 0
+
+   @property
+   def effective_goal_radius(self) -> float:
+      """Creation guard distance — :attr:`goal_radius` or ``radius * margin``."""
+      return self.radius * self.margin if self.goal_radius is None else self.goal_radius
 
    def active_pairs(self) -> dict[frozenset[str], SphereRecord]:
       """Read-only view of the currently active spheres."""
@@ -99,6 +114,24 @@ class IntersectionStateStore:
          losers = pair - {priority}
          existing = self._active.get(pair)
          if existing is None:
+            # Goal guard: a priority drone about to stop at its goal never
+            # exits the sphere — the loser would be parked for good.
+            goal_dist = self._dist_to_goal(drones_by_id.get(priority))
+            if goal_dist is not None and goal_dist <= self.effective_goal_radius:
+               _log.info("IntersectionStateStore: SKIP pair=%s priority=%s near goal (dist=%.3f <= %.3f) — no sphere", sorted(pair), priority, goal_dist,
+                         self.effective_goal_radius)
+               continue
+            # Already sequenced: a gated loser that is parked behind some root
+            # cannot be parked twice. A sphere here would park nobody and
+            # could not release anybody (its root differs from the loser's),
+            # so it would only inflate the sphere count. Once the loser is
+            # released, a still-active conflict is re-detected and gets its
+            # own, freshly placed sphere.
+            waiting_losers = [lid for lid in losers if isinstance(drones_by_id.get(lid), GatedDrone) and drones_by_id[lid].is_waiting]
+            if waiting_losers:
+               _log.debug("IntersectionStateStore: SKIP pair=%s priority=%s — losers %s already waiting on %s", sorted(pair), priority, waiting_losers,
+                          [drones_by_id[lid].waiting_for for lid in waiting_losers])
+               continue
             priority_root = self._resolve_target(priority, drones_by_id)
             _log.info("IntersectionStateStore: INSERT sphere pair=%s priority=%s priority_root=%s losers=%s "
                       "detection_point=%s", sorted(pair), priority, priority_root, sorted(losers), np.round(event.detection_point, 3).tolist())
@@ -126,6 +159,13 @@ class IntersectionStateStore:
          pos = pos_by_id.get(priority)
          if pos is None:
             _log.info("IntersectionStateStore: DROP pair=%s (priority %s no longer present)", sorted(pair), priority)
+            self._release_losers(record, drones, drones_by_id)
+            del self._active[pair]
+            continue
+         goal_dist = self._dist_to_goal(drones_by_id.get(priority))
+         if goal_dist is not None and goal_dist < self.goal_tolerance:
+            _log.info("IntersectionStateStore: DROP pair=%s priority=%s reached goal (dist=%.3f < tol=%.3f)", sorted(pair), priority, goal_dist,
+                      self.goal_tolerance)
             self._release_losers(record, drones, drones_by_id)
             del self._active[pair]
             continue
@@ -202,6 +242,19 @@ class IntersectionStateStore:
             if loser.is_stopping:
                loser.transition_to_parked()
             loser.stop_waiting()
+
+   @staticmethod
+   def _dist_to_goal(drone: Drone | None) -> float | None:
+      """Distance from ``drone`` to its final route target, ``None`` without a route.
+
+      Only the final target counts: intermediate waypoints are passed through,
+      a drone only comes to rest at ``route.target``.
+      """
+      route = getattr(drone, "route", None)
+      if drone is None or route is None:
+         return None
+      pos = np.asarray(drone.x, dtype=float)[:3]
+      return float(np.linalg.norm(pos - np.asarray(route.target, dtype=float)[:3]))
 
    def _resolve_target(self, target_id: str, drones_by_id: dict[str, Drone]) -> str:
       """Walk the wait-chain from ``target_id`` to its non-waiting root.

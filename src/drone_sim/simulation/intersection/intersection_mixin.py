@@ -33,17 +33,25 @@ class IntersectionMixin:
    :param intersection_sphere_radius: Radius of a placed conflict sphere.
    :param intersection_resolution_margin: Anti-flapping factor for sphere
           dissolution (see :class:`IntersectionStateStore`).
+   :param intersection_goal_radius: No sphere is placed whose priority drone
+          is closer than this to its final target. ``None`` means
+          ``radius * margin`` (see :class:`IntersectionStateStore`).
+   :param intersection_goal_tolerance: A sphere is dropped once its priority
+          drone is within this distance of its final target.
    """
 
    intersection_enabled: bool = True
    intersection_sphere_radius: float = 1.2
    intersection_resolution_margin: float = 1.1
+   intersection_goal_radius: float | None = None
+   intersection_goal_tolerance: float = 0.1
 
    _state_store: IntersectionStateStore = field(init=False)
 
    def __post_init__(self) -> None:
       super().__post_init__()
-      self._state_store = IntersectionStateStore(radius=self.intersection_sphere_radius, margin=self.intersection_resolution_margin)
+      self._state_store = IntersectionStateStore(radius=self.intersection_sphere_radius, margin=self.intersection_resolution_margin,
+                                                 goal_radius=self.intersection_goal_radius, goal_tolerance=self.intersection_goal_tolerance)
 
    def _run_intersection_step(self, drones: list[Drone]) -> None:
       """Detect conflicts and advance the sphere store (parks gated losers).

@@ -62,6 +62,10 @@ def _make_physics(dt: float = 0.1) -> LinearKinematicsPhysics:
    )
 
 
+# Fixture goals sit 10 m down the x-axis so no drone trips the store's goal
+# guard (``radius * margin`` from its target); the goal tests below override it.
+
+
 def _gated(drone_id: str, position: np.ndarray) -> GatedDrone:
    x = np.zeros(6)
    x[:3] = position
@@ -76,7 +80,7 @@ def _gated(drone_id: str, position: np.ndarray) -> GatedDrone:
       controller=CentralMPCAgent(dt=0.1, horizon=4),
       physics=_make_physics(),
       x=x,
-      route=Route(waypoints=[], target=position + np.array([1.0, 0, 0])),
+      route=Route(waypoints=[], target=position + np.array([10.0, 0, 0])),
    )
 
 
@@ -94,7 +98,7 @@ def _plain(drone_id: str, position: np.ndarray) -> Drone:
       controller=CentralMPCAgent(dt=0.1, horizon=4),
       physics=_make_physics(),
       x=x,
-      route=Route(waypoints=[], target=position + np.array([1.0, 0, 0])),
+      route=Route(waypoints=[], target=position + np.array([10.0, 0, 0])),
    )
 
 
@@ -356,6 +360,116 @@ def test_state_store_releases_orphaned_waiter_when_target_idles():
    assert active == {}
    assert b.is_waiting is False and b.wait_state == "free"
    assert a.is_waiting is False
+
+
+def test_state_store_skips_sphere_when_priority_near_goal():
+   """No sphere when the priority drone is about to stop at its goal.
+
+   Regression: a drone already sitting at its target won the TTC tie-break,
+   got a sphere it never exits, and parked the passer-by forever. The goal
+   guard (``radius * margin`` by default) must suppress the insert and leave
+   the loser free — plain MPC avoidance handles the stationary drone.
+   """
+   store = IntersectionStateStore(radius=1.2, margin=1.1)
+   a = _gated("a", np.array([0.0, 0.0, 0.0]))
+   a.route.target = np.array([0.0, 0.0, 0.0])  # a is at its goal
+   b = _gated("b", np.array([3.0, 0.0, 0.0]))
+   ev = _event(("a", "b"), ttc_a=0.5, ttc_b=2.0,
+                detection_point=np.array([0.3, 0.0, 0.0]))
+   active = store.step([ev], [a, b], threshold=1.0)
+   assert active == {}
+   assert b.is_waiting is False
+   assert b.wait_state == "free"
+
+   # Same conflict, but a's goal sits just outside the guard → sphere placed.
+   a.route.target = np.array([1.5, 0.0, 0.0])  # 1.5 > 1.2 * 1.1
+   active = store.step([ev], [a, b], threshold=1.0)
+   assert frozenset({"a", "b"}) in active
+   assert b.is_waiting and b.waiting_for == "a"
+
+
+def test_state_store_goal_radius_override():
+   """``goal_radius`` replaces the ``radius * margin`` default of the guard."""
+   store = IntersectionStateStore(radius=1.2, margin=1.1, goal_radius=0.2)
+   assert store.effective_goal_radius == 0.2
+   a = _gated("a", np.array([0.0, 0.0, 0.0]))
+   a.route.target = np.array([0.5, 0.0, 0.0])  # 0.5 > 0.2 → no guard
+   b = _gated("b", np.array([3.0, 0.0, 0.0]))
+   ev = _event(("a", "b"), ttc_a=0.5, ttc_b=2.0)
+   active = store.step([ev], [a, b], threshold=1.0)
+   assert frozenset({"a", "b"}) in active
+
+
+def test_state_store_drops_sphere_when_priority_reaches_goal():
+   """A sphere dissolves once its priority drone is at its goal.
+
+   The priority's target lies inside the sphere, so the enter-then-exit rule
+   would never fire. Arrival at the goal (within ``goal_tolerance``) must drop
+   the sphere and release the loser.
+   """
+   store = IntersectionStateStore(radius=1.2, margin=1.1, goal_tolerance=0.1)
+   a = _gated("a", np.array([0.0, 0.0, 0.0]))
+   a.route.target = np.array([1.5, 0.0, 0.0])  # outside the guard at insert
+   b = _gated("b", np.array([3.0, 0.0, 0.0]))
+   ev = _event(("a", "b"), ttc_a=0.5, ttc_b=2.0,
+                detection_point=np.array([1.0, 0.0, 0.0]))
+   store.step([ev], [a, b], threshold=1.0)
+   assert b.is_waiting and b.waiting_for == "a"
+
+   # a enters the sphere but stops short of the exit distance (1.32 from
+   # center) — still 0.4 from its goal, so nothing drops yet.
+   a.x[:3] = np.array([1.1, 0.0, 0.0])
+   active = store.step([], [a, b], threshold=1.0)
+   assert frozenset({"a", "b"}) in active
+   assert b.is_waiting
+
+   # a arrives at its goal → sphere dropped, b released.
+   a.x[:3] = np.array([1.45, 0.0, 0.0])  # 0.05 < goal_tolerance
+   active = store.step([], [a, b], threshold=1.0)
+   assert active == {}
+   assert b.is_waiting is False
+   assert b.wait_state == "free"
+
+
+def test_state_store_skips_sphere_when_loser_already_waiting():
+   """A pair whose loser is already parked gets no sphere of its own.
+
+   Regression for the sphere blow-up when many drones converge on one spot:
+   every pair among the parked drones used to add a sphere that parked
+   nobody and could release nobody. The conflict is re-detected and gets a
+   fresh sphere once the loser is released.
+   """
+   store = IntersectionStateStore(radius=1.2, margin=1.1)
+   a = _gated("a", np.array([0.0, 0.0, 0.0]))
+   b = _gated("b", np.array([3.0, 0.0, 0.0]))
+   c = _gated("c", np.array([3.0, 3.0, 0.0]))
+
+   # Step 1: (a, b) — a wins, b parks on a.
+   ev_ab = _event(("a", "b"), ttc_a=0.5, ttc_b=3.0,
+                   detection_point=np.array([1.5, 0.0, 0.0]))
+   # (b, c) in the same step: Wait-Veto would hand c the priority — but b is
+   # already parked, so no second sphere.
+   ev_bc = _event(("b", "c"), ttc_a=1.0, ttc_b=1.0,
+                   detection_point=np.array([3.0, 1.5, 0.0]))
+   active = store.step([ev_ab], [a, b, c], threshold=1.0)
+   assert b.waiting_for == "a"
+   active = store.step([ev_ab, ev_bc], [a, b, c], threshold=1.0)
+   assert set(active) == {frozenset({"a", "b"})}
+   assert b.waiting_for == "a"
+   assert c.is_waiting is False
+
+   # Step 3: a passes through and exits → (a, b) drops, b released. Inserts
+   # run before drops within a step, so (b, c) is still skipped here.
+   a.x[:3] = np.array([10.0, 0.0, 0.0])
+   active = store.step([ev_bc], [a, b, c], threshold=1.0)
+   assert active == {}
+   assert b.is_waiting is False and c.is_waiting is False
+
+   # Step 4: the still pending (b, c) conflict now gets its own sphere.
+   active = store.step([ev_bc], [a, b, c], threshold=1.0)
+   assert set(active) == {frozenset({"b", "c"})}
+   assert active[frozenset({"b", "c"})].priority == "b"  # TTC tie → sorted id
+   assert c.is_waiting and c.waiting_for == "b"
 
 
 # ---------- apply_deadlock_dominance (D1, unchanged) ------------------------

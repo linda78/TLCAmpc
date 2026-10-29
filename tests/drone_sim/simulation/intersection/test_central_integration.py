@@ -196,3 +196,60 @@ def test_central_config_runs_two_steps():
       for _ in range(2):
          sim.step()
    assert sim.step_count == 2
+
+
+def test_central_goal_params_reach_state_store():
+   """Goal guard / tolerance knobs are forwarded from the coordinator to the store."""
+   coord = IntersectionCentralCoordinator(
+      dt=0.1, horizon=5, intersection_sphere_radius=2.0,
+      intersection_goal_radius=0.7, intersection_goal_tolerance=0.05,
+   )
+   assert coord._state_store.goal_radius == 0.7
+   assert coord._state_store.effective_goal_radius == 0.7
+   assert coord._state_store.goal_tolerance == 0.05
+   # Default: guard falls back to radius * margin.
+   coord = IntersectionCentralCoordinator(dt=0.1, horizon=5, intersection_sphere_radius=2.0)
+   assert coord._state_store.goal_radius is None
+   assert coord._state_store.effective_goal_radius == pytest.approx(2.2)
+
+
+@pytest.mark.slow
+def test_central_passer_by_is_not_parked_behind_drone_at_goal():
+   """Regression: a gated drone parked at its goal must not block a passer-by.
+
+   drone-1 sits at its target; drone-2 flies past it within the detection
+   threshold. drone-1 wins the TTC tie-break, so without the goal guard it
+   got a sphere it never exits and drone-2 waited forever.
+   """
+   cfg = ScenarioConfig.model_validate({
+      "dt": 0.1,
+      "room": {"min": [-5, -5, -5], "max": [5, 5, 5]},
+      "physics": {"id": "default", "type": "linear_kinematics",
+                  "params": {"v_max": 3.0, "u_min": [-3, -3, -3], "u_max": [3, 3, 3]}},
+      "comm_radius": None,
+      "controller": {"type": "mpc_agent",
+                     "params": {"horizon": 8, "q_pos": [3, 3, 3], "r_u": [0.1, 0.1, 0.1]}},
+      "coordinator": {"type": "mpc_central_intersection",
+                      "params": {"horizon": 8, "intersection_enabled": True,
+                                 "intersection_sphere_radius": 2.0,
+                                 "intersection_resolution_margin": 1.1}},
+      "drones": [
+         {"drone_id": "drone-1", "type": "gated", "start": [0, 0, 0], "target": [0, 0, 0],
+          "radius": 0.2, "safety_zone": 0.6, "cons_stop": 0.0, "drone_color": "#00FFFF",
+          "physics": "default", "safety_zone_mode": "fixed"},
+         {"drone_id": "drone-2", "type": "gated", "start": [-3.5, 0.3, 0], "target": [3.5, 0.3, 0],
+          "radius": 0.2, "safety_zone": 0.6, "cons_stop": 0.0, "drone_color": "#800080",
+          "physics": "default", "safety_zone_mode": "fixed"},
+      ],
+   })
+   sim = Simulator.from_config(cfg)
+   _, d2 = sim.drones
+   with warnings.catch_warnings():
+      warnings.simplefilter("ignore")
+      for _ in range(120):
+         sim.step()
+         assert not d2.is_waiting, "drone-2 was parked behind a drone that sits at its goal"
+         assert sim.coordinator.active_spheres() == {}
+         if d2.route.target_reached(d2.position(), thresh=0.1):
+            break
+   assert d2.route.target_reached(d2.position(), thresh=0.1)
