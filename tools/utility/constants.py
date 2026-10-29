@@ -1,4 +1,5 @@
-# Colors taken from the paper-style JSON configs in configs/*.json, indexed by drone index (1-based).
+# Colors indexed by drone index (1-based). Entries 1-40 are taken from the paper-style JSON configs in configs/*.json;
+# 41-100 were added for larger fleets (density experiment, N up to 100) and are only used for rendering.
 COLOR_BY_DRONE_INDEX = {
     1: "#00FFFF",   # cyan
     2: "#800080",   # purple
@@ -40,6 +41,66 @@ COLOR_BY_DRONE_INDEX = {
     38: "#C0392B",  # alizarin crimson
     39: "#2980B9",  # belize hole blue
     40: "#F39C12",  # sunflower
+    41: "#8B0000",  # dark red
+    42: "#006400",  # dark green
+    43: "#00008B",  # dark blue
+    44: "#B8860B",  # dark goldenrod
+    45: "#8B008B",  # dark magenta
+    46: "#556B2F",  # dark olive green
+    47: "#FF8C00",  # dark orange
+    48: "#9932CC",  # dark orchid
+    49: "#8FBC8F",  # dark sea green
+    50: "#483D8B",  # dark slate blue
+    51: "#2F4F4F",  # dark slate gray
+    52: "#FF00FF",  # magenta
+    53: "#B22222",  # firebrick
+    54: "#228B22",  # forest green
+    55: "#4B0082",  # indigo
+    56: "#7CFC00",  # lawn green
+    57: "#F08080",  # light coral
+    58: "#778899",  # light slate gray
+    59: "#B0C4DE",  # light steel blue
+    60: "#800000",  # maroon
+    61: "#0000CD",  # medium blue
+    62: "#C71585",  # medium violet red
+    63: "#191970",  # midnight blue
+    64: "#808000",  # olive
+    65: "#6B8E23",  # olive drab
+    66: "#DA70D6",  # orchid
+    67: "#98FB98",  # pale green
+    68: "#AFEEEE",  # pale turquoise
+    69: "#CD853F",  # peru
+    70: "#BC8F8F",  # rosy brown
+    71: "#8B4513",  # saddle brown
+    72: "#FA8072",  # salmon
+    73: "#A0522D",  # sienna
+    74: "#6A5ACD",  # slate blue
+    75: "#708090",  # slate gray
+    76: "#00FF7F",  # spring green
+    77: "#4682B4",  # steel blue
+    78: "#D2B48C",  # tan
+    79: "#008080",  # teal
+    80: "#D8BFD8",  # thistle
+    81: "#40E0D0",  # turquoise
+    82: "#EE82EE",  # violet
+    83: "#F5DEB3",  # wheat
+    84: "#9ACD32",  # yellow green
+    85: "#1ABC9C",  # flat turquoise
+    86: "#16A085",  # green sea
+    87: "#2ECC71",  # emerald
+    88: "#27AE60",  # nephritis
+    89: "#3498DB",  # peter river
+    90: "#9B59B6",  # amethyst
+    91: "#8E44AD",  # wisteria
+    92: "#34495E",  # wet asphalt
+    93: "#F1C40F",  # flat yellow
+    94: "#E67E22",  # carrot
+    95: "#D35400",  # pumpkin
+    96: "#E74C3C",  # alizarin
+    97: "#95A5A6",  # concrete
+    98: "#7F8C8D",  # asbestos
+    99: "#D2691E",  # chocolate
+    100: "#00BFFF", # deep sky blue
 }
 
 GIF_WIDTH: int = 900
