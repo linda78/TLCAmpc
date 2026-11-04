@@ -46,6 +46,7 @@ class LocalMPCSolver:
    symmetry_break_eps: float = 0.05  # Random noise magnitude for symmetry breaking
    terminal_constraint: bool = True  # braking-distance terminal radius at the last horizon step (room walls), see RoomConstraints
    terminal_constraint_pairs: bool = False  # the same terminal radius for every drone pair at the last step, see MovingObstacleAvoidanceConstraints
+   terminal_constraint_obstacles: bool = False  # the same terminal radius against every obstacle box at the last step, see ObstacleAvoidanceConstraints
 
    # Shared CPU-time ledger, see drone_sim.simulation.utils.cpu_costs
    costs: CpuCostLedger = field(default_factory=CpuCostLedger, repr=False)
@@ -93,7 +94,7 @@ class LocalMPCSolver:
 
          # Pre-build constraint evaluators (stateless, depend only on horizon)
          collision_c = MovingObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=self.terminal_constraint_pairs)
-         obstacle_c = ObstacleAvoidanceConstraints(horizon=horizon)
+         obstacle_c = ObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=self.terminal_constraint_obstacles)
          room_c = RoomConstraints(horizon=horizon, terminal_constraint=self.terminal_constraint) if room_min is not None and room_max is not None else None
          velocity_c = VelocityConstraints(horizon=horizon)
          # Extract cost weights for inline computation (avoids redundant predict_trajectory in central_cost)

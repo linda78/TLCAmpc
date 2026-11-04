@@ -577,3 +577,18 @@ class TestDistributedCoordinatorTerminalConstraint:
         from drone_sim.domain.registry import create_coordinator
         coordinator = create_coordinator({"type": "dmpc_admm", "params": {"dt": 0.1, "horizon": 5, "terminal_constraint_pairs": True}})
         assert coordinator.terminal_constraint_pairs is True
+
+    def test_obstacles_off_by_default_and_reach_local_solvers(self):
+        coordinator = DistributedMPCCoordinator(dt=0.1, horizon=5)
+        assert coordinator.terminal_constraint_obstacles is False
+        _, local_solvers = coordinator.init_trajectories(self._drones())
+        assert all(solver.terminal_constraint_obstacles is False for solver in local_solvers.values())
+
+        coordinator = DistributedMPCCoordinator(dt=0.1, horizon=5, terminal_constraint_obstacles=True)
+        _, local_solvers = coordinator.init_trajectories(self._drones())
+        assert all(solver.terminal_constraint_obstacles is True for solver in local_solvers.values())
+
+    def test_obstacles_via_scenario_params(self):
+        from drone_sim.domain.registry import create_coordinator
+        coordinator = create_coordinator({"type": "dmpc_admm", "params": {"dt": 0.1, "horizon": 5, "terminal_constraint_obstacles": True}})
+        assert coordinator.terminal_constraint_obstacles is True

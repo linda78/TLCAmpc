@@ -197,3 +197,15 @@ class TestCentralMPCGlobalCoordinatorTerminalConstraint:
       from drone_sim.domain.registry import create_coordinator
       coord = create_coordinator({"type": "mpc_central", "params": {"dt": 0.1, "horizon": 4, "terminal_constraint_pairs": True}})
       assert coord._solver._collision_c._terminal_constraint is True
+
+   def test_obstacles_off_by_default_and_switchable(self):
+      coord = CentralMPCGlobalCoordinator(dt=0.1, horizon=4)
+      assert coord.terminal_constraint_obstacles is False
+      assert coord._solver._obstacle_c._terminal_constraint is False
+      coord = CentralMPCGlobalCoordinator(dt=0.1, horizon=4, terminal_constraint_obstacles=True)
+      assert coord._solver._obstacle_c._terminal_constraint is True
+
+   def test_obstacles_via_scenario_params(self):
+      from drone_sim.domain.registry import create_coordinator
+      coord = create_coordinator({"type": "mpc_central", "params": {"dt": 0.1, "horizon": 4, "terminal_constraint_obstacles": True}})
+      assert coord._solver._obstacle_c._terminal_constraint is True

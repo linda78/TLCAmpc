@@ -1326,3 +1326,118 @@ class TestMovingObstacleTerminalRadius:
         result = constraints.evaluate_multi([d1, d2], pred_pos, np.array([]))
 
         assert result.shape == (horizon,)
+
+
+# ---------------------------------------------------------------
+# ObstacleAvoidanceConstraints -- terminal (braking) radius against obstacle boxes
+# ---------------------------------------------------------------
+
+class TestObstacleTerminalRadius:
+    """With terminal_constraint=True (coordinator parameter terminal_constraint_obstacles) every obstacle gets one additional
+    row for the last horizon step with the drone's terminal radius. Off by default; row layout per obstacle: H step rows,
+    then the terminal row. Distances carry the 1e-3 smoothing of points_to_box_dist, hence abs=2e-3."""
+
+    # first box: face at x = 5 seen from the origin; second box: face at y = 8
+    OBSTACLES = [(np.array([6.0, 0.0, 0.0]), np.array([1.0, 1.0, 1.0])), (np.array([0.0, 9.0, 0.0]), np.array([1.0, 1.0, 1.0]))]
+
+    def test_off_by_default(self):
+        horizon = 3
+        drone = _make_drone(safety_zone=1.0, alpha=0.5, v_max=2.5)
+        pred_vel = np.zeros((horizon, 3))
+        pred_vel[-1] = [2.5, 0.0, 0.0]
+
+        result = ObstacleAvoidanceConstraints(horizon=horizon).evaluate_single(drone, np.zeros((horizon, 3)), self.OBSTACLES, np.array([]),
+                                                                              pred_vel=pred_vel)
+
+        assert result.shape == (2 * horizon,)
+
+    def test_single_appends_one_row_per_obstacle(self):
+        horizon = 3
+        constraints = ObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=True)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5, v_max=2.5)
+        pred_vel = np.zeros((horizon, 3))
+        pred_vel[-1] = [2.5, 0.0, 0.0]
+
+        result = constraints.evaluate_single(drone, np.zeros((horizon, 3)), self.OBSTACLES, np.array([]), pred_vel=pred_vel)
+
+        assert result.shape == (2 * (horizon + 1),)
+        # first box: the last step row keeps the step radius (1.52 at V_max), the terminal row uses the terminal radius
+        assert result[horizon - 1] == pytest.approx(5.0 - (1.0 + 0.5 * 2.5 ** 2 / 6.0), abs=2e-3)
+        assert result[horizon] == pytest.approx(5.0 - _terminal_radius(1.0, 2.5), abs=2e-3)
+        # second box
+        assert result[2 * horizon + 1] == pytest.approx(8.0 - _terminal_radius(1.0, 2.5), abs=2e-3)
+
+    def test_static_drone_gets_braking_allowance_on_fixed_radius(self):
+        horizon = 2
+        constraints = ObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=True)
+        drone = _make_drone(safety_zone=1.52, v_max=2.5)
+        pred_vel = np.zeros((horizon, 3))
+        pred_vel[-1] = [2.5, 0.0, 0.0]
+
+        result = constraints.evaluate_single(drone, np.zeros((horizon, 3)), self.OBSTACLES[:1], np.array([]), pred_vel=pred_vel)
+
+        assert result.shape == (horizon + 1,)
+        assert np.all(result[:horizon] == pytest.approx(5.0 - 1.52, abs=2e-3))
+        assert result[horizon] == pytest.approx(5.0 - _terminal_radius(1.52, 2.5), abs=2e-3)
+
+    def test_terminal_row_uses_last_step_position(self):
+        horizon = 3
+        constraints = ObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=True)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5, v_max=2.5)
+        pred_pos = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]])
+        pred_vel = np.zeros((horizon, 3))
+        pred_vel[-1] = [2.5, 0.0, 0.0]
+
+        result = constraints.evaluate_single(drone, pred_pos, self.OBSTACLES[:1], np.array([]), pred_vel=pred_vel)
+
+        assert result[horizon] == pytest.approx(3.0 - _terminal_radius(1.0, 2.5), abs=2e-3)
+
+    def test_full_braking_keeps_terminal_constraint_feasible(self):
+        """A drone that can just stop in front of the box: step rows positive, terminal row exactly zero."""
+        horizon = 2
+        constraints = ObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=True)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5, v_max=2.5)
+        speed = 2.5
+        pred_pos = np.tile([5.0 - _terminal_radius(1.0, speed), 0.0, 0.0], (horizon, 1))
+        pred_vel = np.tile([speed, 0.0, 0.0], (horizon, 1))
+
+        result = constraints.evaluate_single(drone, pred_pos, self.OBSTACLES[:1], np.array([]), pred_vel=pred_vel)
+
+        assert np.all(result[:horizon] > 0)
+        assert result[horizon] == pytest.approx(0.0, abs=2e-3)
+
+    def test_no_terminal_rows_without_velocities(self):
+        horizon = 2
+        constraints = ObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=True)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5)
+
+        result = constraints.evaluate_single(drone, np.zeros((horizon, 3)), self.OBSTACLES, np.array([]))
+
+        assert result.shape == (2 * horizon,)
+
+    def test_no_obstacles_keeps_zero_rows(self):
+        horizon = 2
+        constraints = ObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=True)
+        drone = _make_drone(safety_zone=1.0, alpha=0.5)
+
+        result = constraints.evaluate_single(drone, np.zeros((horizon, 3)), [], np.array([]), pred_vel=np.zeros((horizon, 3)))
+
+        assert result.shape == (horizon,)
+        assert np.all(result == 0.0)
+
+    def test_multi_appends_one_row_per_drone_and_obstacle(self):
+        horizon = 2
+        constraints = ObstacleAvoidanceConstraints(horizon=horizon, terminal_constraint=True)
+        d1 = _make_drone("d1", safety_zone=1.0, alpha=0.5, v_max=2.5)
+        d2 = _make_drone("d2", x=np.array([0.0, 4.0, 0, 0, 0, 0]), safety_zone=1.52)  # static, at rest
+        pred_pos = {"d1": np.zeros((horizon, 3)), "d2": np.tile([0.0, 4.0, 0.0], (horizon, 1))}
+        pred_vel = {"d1": np.array([[0.0, 0.0, 0.0], [2.5, 0.0, 0.0]]), "d2": np.zeros((horizon, 3))}
+
+        result = constraints.evaluate_multi([d1, d2], pred_pos, self.OBSTACLES, np.array([]), pred_vel=pred_vel)
+
+        assert result.shape == (2 * 2 * (horizon + 1),)
+        assert result[horizon] == pytest.approx(5.0 - _terminal_radius(1.0, 2.5), abs=2e-3)          # d1, first box
+        assert result[2 * horizon + 1] == pytest.approx(8.0 - _terminal_radius(1.0, 2.5), abs=2e-3)  # d1, second box
+        d2_offset = 2 * (horizon + 1)
+        assert result[d2_offset + horizon] == pytest.approx(np.sqrt(5.0 ** 2 + 3.0 ** 2) - 1.52, abs=2e-3)  # d2 at rest: terminal radius = fixed radius
+        assert result[d2_offset + 2 * horizon + 1] == pytest.approx(4.0 - 1.52, abs=2e-3)

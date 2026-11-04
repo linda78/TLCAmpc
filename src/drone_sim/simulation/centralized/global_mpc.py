@@ -33,6 +33,7 @@ class GlobalMPCSolver:
    room_wall_tolerance: float = 0.0
    terminal_constraint: bool = True  # braking-distance terminal radius at the last horizon step (room walls), see RoomConstraints
    terminal_constraint_pairs: bool = False  # the same terminal radius for every drone pair at the last step, see MovingObstacleAvoidanceConstraints
+   terminal_constraint_obstacles: bool = False  # the same terminal radius against every obstacle box at the last step, see ObstacleAvoidanceConstraints
    symmetry_break_accel: float = 0.05
 
    # Shared CPU-time ledger, see drone_sim.simulation.utils.cpu_costs
@@ -46,7 +47,7 @@ class GlobalMPCSolver:
 
    def __post_init__(self) -> None:
       self._collision_c = MovingObstacleAvoidanceConstraints(horizon=self.horizon, terminal_constraint=self.terminal_constraint_pairs)
-      self._obstacle_c = ObstacleAvoidanceConstraints(horizon=self.horizon)
+      self._obstacle_c = ObstacleAvoidanceConstraints(horizon=self.horizon, terminal_constraint=self.terminal_constraint_obstacles)
       self._room_c = RoomConstraints(horizon=self.horizon, wall_tolerance=self.room_wall_tolerance, terminal_constraint=self.terminal_constraint)
       self._velocity_c = VelocityConstraints(horizon=self.horizon)
 
