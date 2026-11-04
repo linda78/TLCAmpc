@@ -60,6 +60,7 @@ class ThreadedMPCCoordinator:
     gauss_seidel: bool = False  # Optional staggered spawn
     terminal_constraint: bool = True  # braking-distance terminal radius at the last horizon step (room walls), see RoomConstraints
     terminal_constraint_pairs: bool = False  # the same terminal radius for every drone pair at the last step, see MovingObstacleAvoidanceConstraints
+    terminal_constraint_obstacles: bool = False  # the same terminal radius against every obstacle box at the last step, see ObstacleAvoidanceConstraints
 
     # Internal state (initialized in __post_init__)
     _neighbor_graph: NeighborGraph = field(init=False, repr=False)
@@ -127,7 +128,8 @@ class ThreadedMPCCoordinator:
 
         for drone in opt_drones:
             local_solver = LocalMPCSolver(dt=self.dt, horizon=self.horizon, terminal_constraint=self.terminal_constraint,
-                                          terminal_constraint_pairs=self.terminal_constraint_pairs)
+                                          terminal_constraint_pairs=self.terminal_constraint_pairs,
+                                          terminal_constraint_obstacles=self.terminal_constraint_obstacles)
 
             # Pass warm-start from previous timestep if available
             u_prev = self._u_prev.get(drone.drone_id)

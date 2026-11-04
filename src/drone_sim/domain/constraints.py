@@ -285,6 +285,20 @@ class MovingObstacleAvoidanceConstraints(MPCConstraints):
 
 
 class ObstacleAvoidanceConstraints(MPCConstraints):
+   """Static obstacle avoidance: at every horizon step the drone's safety sphere must stay clear of every obstacle box.
+
+   With ``terminal_constraint`` (default off, coordinator parameter ``terminal_constraint_obstacles``) every obstacle gets
+   one additional row for the last horizon step that uses the terminal radius ``Drone.compute_terminal_radius`` (base
+   radius plus the full stopping distance plus half a sampling step) instead of the step radius, the obstacle counterpart
+   of the wall rows in ``RoomConstraints``. The row is appended after the H step rows of that obstacle. This keeps braking
+   to a standstill in front of a box a feasible continuation of any plan, so a drone cannot run at an obstacle faster than
+   it can stop. Calls without velocities get no terminal rows.
+   """
+
+   def __init__(self, horizon: int, terminal_constraint: bool = False):
+      super().__init__(horizon)
+      self._terminal_constraint = terminal_constraint
+
    def label(self) -> str:
       return "obstacle_avoidance"
 
@@ -344,7 +358,8 @@ class ObstacleAvoidanceConstraints(MPCConstraints):
       Produces one horizon-length row per obstacle and concatenates them so
       that SLSQP treats each element as a separate inequality constraint.
       With N obstacles and horizon H the returned shape is (N*H,), or (H,)
-      when there are no obstacles.
+      when there are no obstacles. With the terminal constraint and velocities
+      every obstacle gets one more row, so the shape is (N*(H+1),).
 
       :param drone: the drone.
       :param pred_pos: predicted positions (horizon, 3).
@@ -354,11 +369,16 @@ class ObstacleAvoidanceConstraints(MPCConstraints):
       """
       parts = []
       radii = _safety_radii(drone, pred_vel, self._horizon)
+      last = self._horizon - 1
+      r_term = drone.compute_terminal_radius(pred_vel[last]) if self._terminal_constraint and pred_vel is not None else None
       for center, half_extents in obstacles:
          obstacle_center = np.asarray(center, dtype=float).reshape(3)
          obstacle_half_extents = np.asarray(half_extents, dtype=float).reshape(3)
          dists = points_to_box_dist(pred_pos, obstacle_center, obstacle_half_extents)
          row = dists - radii
+         if r_term is not None:
+            # Terminal constraint: the sphere with the full braking radius at the last step stays clear of the box
+            row = np.append(row, dists[last] - r_term)
          parts.append(row)
       if not parts:
          return np.zeros(self._horizon)
