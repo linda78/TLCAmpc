@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
 
 from drone_sim.gui.backend import StepResult, SimState
 from drone_sim.gui.direct_backend import DirectBackend
+from drone_sim.gui.replay_backend import ReplayBackend
 from drone_sim.api.utils.render_helper import draw_room_wireframe, draw_sphere_wireframe, draw_trace, draw_obstacles, draw_obj_mesh, draw_prediction_tube
 
 _MAX_RUN_STEPS = 5000  # run-to-completion cap (matches paper2_tools/scenarios.py default)
@@ -20,13 +22,16 @@ _PREDICTION_TUBE_SAMPLES = 50           # arc-length samples per BoF prediction 
 _PREDICTION_TUBE_OUTER_ALPHA = 0.03     # safety-zone tube
 _PREDICTION_TUBE_INNER_ALPHA = 0.08     # core (drone-radius) tube
 _PREDICTION_TUBE_CENTERLINE_ALPHA = 0.02  # dashed centerline opacity (drawn once)
+_REPLAY_SPEEDS = (0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0)  # replay factor: >=1 frames per tick, <1 stretches the tick interval
+_ZOOM_STEP = 0.85  # zoom factor per key press or scroll notch (<1 zooms in)
+_PAN_FRACTION = 0.05  # pan step per key press as a fraction of the canvas
+_DRAG_ZOOM_PIXELS = 100.0  # right-drag: this many pixels upwards halve the view (zoom in twice as close)
 
 def _coerce_color(color):
    """Convert color list/tuple to a tuple matplotlib accepts (str passes through)."""
    if isinstance(color, (list, tuple)):
       return tuple(float(c) for c in color[:3])
    return color
-
 
 def _draw_ghost_max_sphere(ax: object, is_adaptive: bool, position, safety_zone:float, max_radius:float, safety_color):
    if is_adaptive:
@@ -48,7 +53,10 @@ class MainWindow(QMainWindow):
         self._playing: bool = False
         self._interval_ms: int = 100
         self._traces: dict[str, list[list[float]]] = {}
-        self._zoom: float = 1.0  # <1 zoomed in, >1 zoomed out; applied to room limits
+        self._zoom: float = 1.0  # <1 zoomed in, >1 zoomed out; camera zoom, the axis limits always stay the room
+        self._pan = np.zeros(2)  # shift of the picture (right, up) in canvas fractions; reset on load and reset like _zoom
+        self._drag: tuple[int, float, float] | None = None  # (button, x, y) of a running right/middle mouse drag
+        self._replay_speed_idx: int = _REPLAY_SPEEDS.index(1.0)
         self._run_to_completion: bool = False
         self._obj_path: Path | None = None  # path to .obj file for 3D drone model
         self._obj_scale: float = 0.3  # scale of the OBJ model in world units
@@ -66,9 +74,12 @@ class MainWindow(QMainWindow):
         self._canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
         self._canvas.setMinimumSize(400, 300)
         self._ax = fig.add_subplot(111, projection="3d")
+        self._ax_base = self._ax.get_position(original=True).frozen()  # the pan shifts the axes relative to this
+        self._canvas.setToolTip("Mouse: left drag rotate, right drag zoom, middle drag pan, wheel zoom")
 
         # ---- Controls ----
         self._btn_open = QPushButton("Open")
+        self._btn_replay = QPushButton("Replay CSV")
         self._btn_play = QPushButton("Play")
         self._btn_pause = QPushButton("Pause")
         self._btn_reset = QPushButton("Reset")
@@ -77,6 +88,32 @@ class MainWindow(QMainWindow):
         self._btn_record = QPushButton("Record")
         self._btn_obj_model = QPushButton("OBJ Model")
         self._obj_model_label = QLabel("Model: scatter")
+        self._keys_label = QLabel("Keys: +/- zoom, w/a/s/d pan, Space play/pause")
+        self._keys_label.setWordWrap(True)
+
+        # ---- Replay controls (shown only while a ReplayBackend is loaded) ----
+        self._btn_slower = QPushButton("Slower")
+        self._btn_slower.setToolTip("Halve the replay speed (key ,)")
+        self._btn_faster = QPushButton("Faster")
+        self._btn_faster.setToolTip("Double the replay speed (key .)")
+        self._speed_factor_label = QLabel("×1")
+        self._speed_factor_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._speed_factor_label.setToolTip("×1 = one frame per tick of the Speed slider (100 ms is real time for dt = 0.1 s)")
+        self._frame_slider = QSlider(Qt.Orientation.Horizontal)
+        self._frame_slider.setRange(0, 0)
+        self._frame_slider.setToolTip("Frame (keys: Left/Right one frame, Shift+Left/Right ten frames, Home/End first/last)")
+        self._frame_label = QLabel("frame 0 / 0")
+        self._replay_box = QGroupBox("Replay")
+        _replay_layout = QVBoxLayout()
+        _speed_row = QHBoxLayout()
+        _speed_row.addWidget(self._btn_slower)
+        _speed_row.addWidget(self._speed_factor_label)
+        _speed_row.addWidget(self._btn_faster)
+        _replay_layout.addLayout(_speed_row)
+        _replay_layout.addWidget(self._frame_slider)
+        _replay_layout.addWidget(self._frame_label)
+        self._replay_box.setLayout(_replay_layout)
+        self._replay_box.setVisible(False)
 
         # ---- Status widgets ----
         self._collision_label = QLabel("No Collisions")
@@ -123,6 +160,7 @@ class MainWindow(QMainWindow):
 
         # ---- Signal connections ----
         self._btn_open.clicked.connect(self._on_open_file)
+        self._btn_replay.clicked.connect(self._on_open_replay)
         self._btn_play.clicked.connect(self._on_play)
         self._btn_pause.clicked.connect(self._on_pause)
         self._btn_reset.clicked.connect(self._on_reset)
@@ -131,17 +169,38 @@ class MainWindow(QMainWindow):
         self._btn_record.clicked.connect(self._on_record)
         self._btn_obj_model.clicked.connect(self._on_select_obj_model)
         self._speed_slider.valueChanged.connect(self._on_speed_changed)
+        self._btn_slower.clicked.connect(self._on_slower)
+        self._btn_faster.clicked.connect(self._on_faster)
+        self._frame_slider.valueChanged.connect(self._seek)
 
         # ---- Keyboard shortcuts ----
         # QShortcut fires regardless of which child widget has focus (unlike keyPressEvent
         # which only fires when MainWindow itself has focus — canvas steals focus after orbit).
         spacebar = QShortcut(QKeySequence(Qt.Key.Key_Space), self)
         spacebar.activated.connect(self._toggle_play_pause)
+        # View (both modes): +/- zoom, w/a/s/d move the picture up/left/down/right. Replay only: , . speed, arrows/Home/End frames.
+        self._shortcuts: dict[str, QShortcut] = {}
+        for key, slot in (("+", partial(self._zoom_by, _ZOOM_STEP)), ("=", partial(self._zoom_by, _ZOOM_STEP)), ("-", partial(self._zoom_by, 1.0 / _ZOOM_STEP)),
+                          ("w", partial(self._pan_by, 0.0, _PAN_FRACTION)), ("s", partial(self._pan_by, 0.0, -_PAN_FRACTION)),
+                          ("a", partial(self._pan_by, -_PAN_FRACTION, 0.0)), ("d", partial(self._pan_by, _PAN_FRACTION, 0.0)),
+                          (",", self._on_slower), (".", self._on_faster),
+                          ("Left", partial(self._step_frames, -1)), ("Right", partial(self._step_frames, 1)),
+                          ("Shift+Left", partial(self._step_frames, -10)), ("Shift+Right", partial(self._step_frames, 10)),
+                          ("Home", partial(self._seek, 0)), ("End", self._seek_end)):
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.activated.connect(slot)
+            self._shortcuts[key] = shortcut
 
-        # ---- Scroll zoom ----
+        # ---- Mouse zoom and pan ----
         # Axes3D scroll zoom is not wired automatically in the Qt backend without a
         # NavigationToolbar. Connect it manually via mpl_connect.
         self._canvas.mpl_connect("scroll_event", self._on_scroll)
+        # mplot3d's own pan/zoom buttons change the axis limits, which shrinks the grey panes instead of the picture.
+        # Keep its left-drag rotation and route right-drag (zoom) and middle-drag (pan) through the camera view.
+        self._ax.mouse_init(rotate_btn=1, pan_btn=[], zoom_btn=[])
+        self._canvas.mpl_connect("button_press_event", self._on_button_press)
+        self._canvas.mpl_connect("motion_notify_event", self._on_mouse_move)
+        self._canvas.mpl_connect("button_release_event", self._on_button_release)
 
     # ------------------------------------------------------------------ #
     # Playback slots                                                       #
@@ -151,19 +210,43 @@ class MainWindow(QMainWindow):
         path_str, _ = QFileDialog.getOpenFileName(self, "Open Scenario JSON", "configs", "JSON Files (*.json)")
         if not path_str:
             return
+        if not isinstance(self._backend, DirectBackend):
+            self._backend = DirectBackend()  # leave a replay
         self._backend.load_config(Path(path_str))
+        self._after_load()
+
+    def _on_open_replay(self) -> None:
+        """Replay a recorded run: a per-step CSV (drone_id, t, x, y, z, vx, vy, vz) plus the scenario JSON it was recorded with."""
+        csv_str, _ = QFileDialog.getOpenFileName(self, "Open Replay CSV", "paper2_tools", "CSV Files (*.csv)")
+        if not csv_str:
+            return
+        json_str, _ = QFileDialog.getOpenFileName(self, "Scenario JSON of the replay", "configs", "JSON Files (*.json)")
+        if not json_str:
+            return
+        backend = ReplayBackend()
+        try:
+            backend.load_config(Path(json_str))
+            backend.load_csv(Path(csv_str))
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Replay", str(exc))
+            return
+        self._backend = backend
+        self._after_load()
+
+    def _after_load(self) -> None:
+        """Common part after load_config() of either backend: first frame, traces, info panel."""
         self._playing = False
         self._traces = {}
         self._zoom = 1.0
+        self._pan = np.zeros(2)
+        self._replay_box.setVisible(isinstance(self._backend, ReplayBackend))
         # Call step() once to get initial drone positions for first render.
         # (SimState from load_config has counts only, no per-drone positions.)
         # Research note (open question 3): simplest approach is one probe step on load.
         result = self._backend.step()
         for drone in result.drones:
             self._traces.setdefault(drone.drone_id, []).append(drone.position.tolist())
-        self._redraw(result)
-        self._update_step_label(result)
-        self._update_collision_indicator(result)
+        self._show(result)
         state = self._backend.get_state()
         self._on_config_loaded(state)
 
@@ -186,15 +269,14 @@ class MainWindow(QMainWindow):
         self._playing = False
         self._traces = {}  # CRITICAL: clear GUI traces BEFORE backend reset (pitfall 7)
         self._zoom = 1.0
+        self._pan = np.zeros(2)
         self._backend.reset()
         # Draw initial frame after reset via one probe step.
         # Intentional: reset always shows step 1 (research open question 3).
         result = self._backend.step()
         for drone in result.drones:
             self._traces.setdefault(drone.drone_id, []).append(drone.position.tolist())
-        self._redraw(result)
-        self._update_step_label(result)
-        self._update_collision_indicator(result)
+        self._show(result)
         # NOTE: _on_config_loaded is NOT called on reset — config metadata is unchanged
 
     def _on_run_to_completion(self) -> None:
@@ -231,19 +313,21 @@ class MainWindow(QMainWindow):
     def _tick(self) -> None:
         if not self._playing:
             return  # Pause was pressed — do not reschedule
-        result = self._backend.step()
+        if isinstance(self._backend, ReplayBackend):
+            # Replay: jump by the speed factor's frame count and take the traces from the recording (skipped frames included)
+            result = self._backend.seek(self._backend.frame_index + self._frames_per_tick())
+            self._traces = self._backend.positions_up_to()
+        else:
+            result = self._backend.step()
+            for drone in result.drones:
+                self._traces.setdefault(drone.drone_id, []).append(drone.position)
         if result.infeasible:
             self._playing = False
             self._run_to_completion = False
             reason = result.infeasible_reason or "Solver reported infeasible controls."
             QMessageBox.warning(self, "Solver Infeasible", reason)
             return  # do NOT reschedule (pitfall 6)
-        for drone in result.drones:
-            self._traces.setdefault(drone.drone_id, []).append(drone.position)
-        self._redraw(result)
-        self._update_step_label(result)
-        self._update_collision_indicator(result)
-        self._update_admm_indicator(result)
+        self._show(result)
 
         # Run-to-completion termination check:
         if self._run_to_completion:
@@ -252,8 +336,22 @@ class MainWindow(QMainWindow):
                 self._run_to_completion = False
                 return  # do NOT reschedule (auto-stop)
 
+        # A replay stops on its last frame
+        if result.end_of_data:
+            self._playing = False
+            self._run_to_completion = False
+            return
+
         # Reschedule AFTER current tick completes — prevents event accumulation (locked decision)
-        QTimer.singleShot(self._interval_ms, self._tick)
+        QTimer.singleShot(self._tick_interval_ms(), self._tick)
+
+    def _show(self, result: StepResult) -> None:
+        """Draw a step or frame and refresh every indicator that depends on it."""
+        self._redraw(result)
+        self._update_step_label(result)
+        self._update_collision_indicator(result)
+        self._update_admm_indicator(result)
+        self._update_frame_slider(result)
 
     def _redraw(self, result: StepResult) -> None:
         self._last_result = result
@@ -322,24 +420,12 @@ class MainWindow(QMainWindow):
             )
 
 
-        # Set axis limits from room bounds, scaled by zoom level.
-        # self._zoom is stored on self (not ax) so ax.cla() never resets it.
-        cx = (room_min[0] + room_max[0]) / 2
-        cy = (room_min[1] + room_max[1]) / 2
-        cz = (room_min[2] + room_max[2]) / 2
-        hx = (room_max[0] - room_min[0]) / 2 * self._zoom
-        hy = (room_max[1] - room_min[1]) / 2 * self._zoom
-        hz = (room_max[2] - room_min[2]) / 2 * self._zoom
-        self._ax.set_xlim(cx - hx, cx + hx)
-        self._ax.set_ylim(cy - hy, cy + hy)
-        self._ax.set_zlim(cz - hz, cz + hz)
+        # Axis limits are the room, zoom and pan are applied as camera view.
+        # self._zoom and self._pan are stored on self (not ax) so ax.cla() never resets them.
+        self._apply_view_to(self._ax, self._ax_base, room_min, room_max)
         self._ax.set_xlabel("x")
         self._ax.set_ylabel("y")
         self._ax.set_zlabel("z")
-
-        box = [room_max[i] - room_min[i] for i in range(3)]
-        if all(b > 0 for b in box):
-            self._ax.set_box_aspect(box)
 
         # Use draw_idle — NOT draw() — to avoid blocking the event loop (pitfall)
         self._canvas.draw_idle()
@@ -410,6 +496,7 @@ class MainWindow(QMainWindow):
             if trace:
                 draw_trace(ax, trace, drone.trace_color)
 
+<<<<<<< Updated upstream
         # BoF prediction tubes (mirror live view: outer safety halo + inner body tube).
         #  TODO: refactor, it should not be needed to implement that stuff twice!
         for pred in result.predictions:
@@ -445,13 +532,13 @@ class MainWindow(QMainWindow):
         ax.set_xlim(cx - hx, cx + hx)
         ax.set_ylim(cy - hy, cy + hy)
         ax.set_zlim(cz - hz, cz + hz)
+=======
+        # Same camera view as the live canvas (zoom and pan)
+        self._apply_view_to(ax, ax.get_position(original=True).frozen(), sim_state.room_min, sim_state.room_max)
+>>>>>>> Stashed changes
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         ax.set_zlabel("z")
-
-        box = [room_max[i] - room_min[i] for i in range(3)]
-        if all(b > 0 for b in box):
-            ax.set_box_aspect(box)
 
         # Scenario name (lower-left) and timestamp (lower-right)
         scenario_name = Path(sim_state.config_path).stem if sim_state.config_path else "unknown"
@@ -464,7 +551,10 @@ class MainWindow(QMainWindow):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{scenario_name}_{result.step_count}_{timestamp}.png"
         path = out_dir / filename
-        fig.savefig(str(path), dpi=150, bbox_inches="tight")
+        # Tight cropping only for the full view; a zoomed or panned view is saved as shown, otherwise the crop would
+        # grow back to the whole room (3D artists are not clipped to the axes)
+        full_view = self._zoom == 1.0 and not np.any(self._pan)
+        fig.savefig(str(path), dpi=150, bbox_inches="tight" if full_view else None)
 
         # Save data snapshot for later re-rendering
         snapshot = {
@@ -476,7 +566,7 @@ class MainWindow(QMainWindow):
             "room_min": sim_state.room_min.tolist(),
             "room_max": sim_state.room_max.tolist(),
             "obstacles": [(c.tolist(), e.tolist()) for c, e in sim_state.obstacles],
-            "view": {"elev": self._ax.elev, "azim": self._ax.azim, "zoom": self._zoom},
+            "view": {"elev": self._ax.elev, "azim": self._ax.azim, "zoom": self._zoom, "pan": self._pan.tolist()},
             "drones": [
                 {
                     "drone_id": d.drone_id,
@@ -585,17 +675,124 @@ class MainWindow(QMainWindow):
         self._speed_label.setText(f"{value} ms")
 
     # ------------------------------------------------------------------ #
-    # Scroll zoom                                                          #
+    # Replay: speed factor and frame position                             #
     # ------------------------------------------------------------------ #
 
-    def _on_scroll(self, event) -> None:
-        """Zoom 3D view by scaling room limits stored in self._zoom.
-        Stored in Python (not on ax) so ax.cla() in _redraw() cannot reset it."""
-        if event.button == "up":
-            self._zoom = max(0.2, self._zoom * 0.85)
-        elif event.button == "down":
-            self._zoom = min(5.0, self._zoom * (1.0 / 0.85))
+    @property
+    def _replay_speed(self) -> float:
+        return _REPLAY_SPEEDS[self._replay_speed_idx]
+
+    def _set_replay_speed(self, idx: int) -> None:
+        self._replay_speed_idx = min(max(idx, 0), len(_REPLAY_SPEEDS) - 1)
+        self._speed_factor_label.setText(f"×{self._replay_speed:g}")
+
+    def _on_faster(self) -> None:
+        self._set_replay_speed(self._replay_speed_idx + 1)
+
+    def _on_slower(self) -> None:
+        self._set_replay_speed(self._replay_speed_idx - 1)
+
+    def _frames_per_tick(self) -> int:
+        """Replay frames shown per tick: the speed factor rounded, at least one."""
+        return max(1, int(round(self._replay_speed)))
+
+    def _tick_interval_ms(self) -> int:
+        """Tick interval: the Speed slider's value, stretched by replay factors below one."""
+        if isinstance(self._backend, ReplayBackend) and self._replay_speed < 1.0:
+            return int(round(self._interval_ms / self._replay_speed))
+        return self._interval_ms
+
+    def _update_frame_slider(self, result: StepResult) -> None:
+        if not isinstance(self._backend, ReplayBackend):
+            return
+        last = max(self._backend.frame_count - 1, 0)
+        self._frame_slider.blockSignals(True)  # following the playback must not seek
+        self._frame_slider.setRange(0, last)
+        self._frame_slider.setValue(result.step_count)
+        self._frame_slider.blockSignals(False)
+        self._frame_label.setText(f"frame {result.step_count} / {last}")
+
+    def _seek(self, index: int) -> None:
+        """Replay only: jump to a frame (clamped), rebuild the traces up to it and show it. Playback continues from there."""
+        backend = self._backend
+        if not isinstance(backend, ReplayBackend) or backend.frame_count == 0:
+            return
+        result = backend.seek(index)
+        self._traces = backend.positions_up_to()
+        self._show(result)
+
+    def _seek_end(self) -> None:
+        if isinstance(self._backend, ReplayBackend):
+            self._seek(self._backend.frame_count - 1)
+
+    def _step_frames(self, delta: int) -> None:
+        if isinstance(self._backend, ReplayBackend):
+            self._seek(self._backend.frame_index + delta)
+
+    # ------------------------------------------------------------------ #
+    # View: camera zoom and screen pan (keys, scroll wheel, mouse drag)   #
+    # ------------------------------------------------------------------ #
+
+    def _apply_view_to(self, ax, base, room_min, room_max) -> None:
+        """Put the room and the current zoom/pan on an Axes3D.
+
+        The axis limits always stay the room, so matplotlib's grey panes stay on the room walls. Zooming enlarges the
+        box aspect and the focal length by the same factor, which magnifies the picture about its centre without
+        changing the perspective. Panning shifts the axes within the figure relative to ``base`` (its original position).
+        """
+        ax.set_xlim(room_min[0], room_max[0])
+        ax.set_ylim(room_min[1], room_max[1])
+        ax.set_zlim(room_min[2], room_max[2])
+        box = [room_max[i] - room_min[i] for i in range(3)]
+        magnification = 1.0 / self._zoom
+        if all(b > 0 for b in box):
+            ax.set_box_aspect(box, zoom=magnification)
+        ax.set_proj_type("persp", focal_length=magnification)
+        ax.set_position([base.x0 + self._pan[0] * base.width, base.y0 + self._pan[1] * base.height, base.width, base.height], which="original")
+
+    def _apply_view(self) -> None:
+        """Apply the current zoom and pan to the live axes and redraw, so a change shows without waiting for the next step."""
+        if self._last_result is None:
+            return
+        state = self._backend.get_state()
+        self._apply_view_to(self._ax, self._ax_base, state.room_min, state.room_max)
         self._canvas.draw_idle()
+
+    def _zoom_by(self, factor: float) -> None:
+        self._zoom = min(5.0, max(0.2, self._zoom * factor))
+        self._apply_view()
+
+    def _pan_by(self, dx: float, dy: float) -> None:
+        """Move the picture by (dx, dy) canvas fractions to the right and up."""
+        self._pan = self._pan + np.array([dx, dy], dtype=float)
+        self._apply_view()
+
+    def _on_scroll(self, event) -> None:
+        """Scroll wheel zoom; same steps as the +/- keys."""
+        if event.button == "up":
+            self._zoom_by(_ZOOM_STEP)
+        elif event.button == "down":
+            self._zoom_by(1.0 / _ZOOM_STEP)
+
+    def _on_button_press(self, event) -> None:
+        if event.button in (2, 3) and event.x is not None and event.y is not None:
+            self._drag = (int(event.button), float(event.x), float(event.y))
+
+    def _on_button_release(self, event) -> None:
+        self._drag = None
+
+    def _on_mouse_move(self, event) -> None:
+        """Right drag: up zooms in, down zooms out. Middle drag: the picture follows the mouse."""
+        if self._drag is None or event.x is None or event.y is None:
+            return
+        button, x0, y0 = self._drag
+        dx, dy = float(event.x) - x0, float(event.y) - y0  # figure pixels, y upwards
+        self._drag = (button, float(event.x), float(event.y))
+        if button == 3:
+            self._zoom_by(2.0 ** (-dy / _DRAG_ZOOM_PIXELS))
+        else:
+            bbox = self._canvas.figure.bbox
+            self._pan_by(dx / bbox.width, dy / bbox.height)
 
     # ------------------------------------------------------------------ #
     # Responsive layout                                                    #
@@ -618,6 +815,7 @@ class MainWindow(QMainWindow):
             # Reparent widgets before deleting layout
             self._canvas.setParent(None)
             self._btn_open.setParent(None)
+            self._btn_replay.setParent(None)
             self._btn_play.setParent(None)
             self._btn_pause.setParent(None)
             self._btn_reset.setParent(None)
@@ -626,6 +824,8 @@ class MainWindow(QMainWindow):
             self._btn_record.setParent(None)
             self._btn_obj_model.setParent(None)
             self._obj_model_label.setParent(None)
+            self._keys_label.setParent(None)
+            self._replay_box.setParent(None)
             self._speed_slider.setParent(None)
             self._speed_label.setParent(None)
             self._collision_label.setParent(None)
@@ -643,6 +843,7 @@ class MainWindow(QMainWindow):
             # Landscape: controls on left, vertical, max width limited
             ctrl_layout = QVBoxLayout()
             ctrl_layout.addWidget(self._btn_open)
+            ctrl_layout.addWidget(self._btn_replay)
             ctrl_layout.addWidget(self._btn_play)
             ctrl_layout.addWidget(self._btn_pause)
             ctrl_layout.addWidget(self._btn_reset)
@@ -650,8 +851,11 @@ class MainWindow(QMainWindow):
             ctrl_layout.addWidget(self._btn_screenshot)
             ctrl_layout.addWidget(self._btn_record)
             ctrl_layout.addSpacing(10)
+            ctrl_layout.addWidget(self._replay_box)
+            ctrl_layout.addSpacing(10)
             ctrl_layout.addWidget(self._btn_obj_model)
             ctrl_layout.addWidget(self._obj_model_label)
+            ctrl_layout.addWidget(self._keys_label)
             ctrl_layout.addSpacing(15)
             ctrl_layout.addWidget(self._info_box)
             ctrl_layout.addWidget(self._collision_label)
@@ -677,6 +881,7 @@ class MainWindow(QMainWindow):
             # Portrait: controls at bottom, horizontal
             ctrl_layout = QHBoxLayout()
             ctrl_layout.addWidget(self._btn_open)
+            ctrl_layout.addWidget(self._btn_replay)
             ctrl_layout.addWidget(self._btn_play)
             ctrl_layout.addWidget(self._btn_pause)
             ctrl_layout.addWidget(self._btn_reset)
@@ -695,7 +900,9 @@ class MainWindow(QMainWindow):
 
             status_row = QHBoxLayout()
             status_row.addWidget(self._info_box)
+            status_row.addWidget(self._replay_box)
             status_row.addWidget(self._obj_model_label)
+            status_row.addWidget(self._keys_label)
             status_row.addStretch()
             status_row.addWidget(self._collision_label)
             status_row.addWidget(self._admm_label)

@@ -6,8 +6,24 @@ from pathlib import Path
 import numpy as np
 
 from drone_sim.domain.config import ScenarioConfig
+from drone_sim.domain.drone import Drone
 from drone_sim.simulation.simulator import Simulator
 from drone_sim.gui.backend import (SimulationBackend, SimState, DroneState, StepResult, PredictedTrajectory, )
+
+
+def make_drone_states(drones: list[Drone]) -> tuple[list[DroneState], list[float]]:
+   """DroneState per drone plus the current effective safety radius per drone, from the drones' current state."""
+   drone_states: list[DroneState] = []
+   safety_radii: list[float] = []
+   for d in drones:
+      vel = d.velocity()
+      r = float(d.compute_adaptive_radius(vel))
+      safety_radii.append(r)
+      drone_states.append(DroneState(drone_id=d.drone_id, position=d.position(), velocity=vel, radius=d.radius, safety_zone=float(d.safety_zone),
+            adaptive_safety_radius=r if d.is_adaptive else None, max_adaptive_safety_radius=d.compute_max_adaptive_radius() if d.is_adaptive else None,
+            color=d.color if isinstance(d.color, str) else list(d.color), safety_color=(d.safety_color if isinstance(d.safety_color, str) else list(d.safety_color)),
+            trace_color=(d.trace_color if isinstance(d.trace_color, str) else list(d.trace_color))))
+   return drone_states, safety_radii
 
 
 class DirectBackend(SimulationBackend):
@@ -59,17 +75,7 @@ class DirectBackend(SimulationBackend):
 
    def _make_step_result(self) -> StepResult:
       sim = self._sim
-      drone_states: list[DroneState] = []
-      safety_radii: list[float] = []
-
-      for i, d in enumerate(sim.drones):
-         vel = d.velocity()
-         r =  float(d.compute_adaptive_radius(vel))
-         safety_radii.append(r)
-         drone_states.append(DroneState(drone_id=d.drone_id, position=d.position(), velocity=vel, radius=d.radius, safety_zone=float(d.safety_zone),
-               adaptive_safety_radius=r if d.is_adaptive else None, max_adaptive_safety_radius=d.compute_max_adaptive_radius() if d.is_adaptive else None,
-               color=d.color if isinstance(d.color, str) else list(d.color), safety_color=(d.safety_color if isinstance(d.safety_color, str) else list(d.safety_color)),
-               trace_color=(d.trace_color if isinstance(d.trace_color, str) else list(d.trace_color))))
+      drone_states, safety_radii = make_drone_states(sim.drones)
 
       # Destination check — helper takes Drone objects, not DroneState (BACK-01: no sim access in GUI)
       from drone_sim.domain.utils.helper import all_drones_reached_destination

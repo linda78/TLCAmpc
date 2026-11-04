@@ -49,6 +49,7 @@ class StepResult:
     all_reached: bool = False              # True when all drones are at their destination
     admm_iteration_count: int | None = None  # None for non-ADMM coordinators
     predictions: list[PredictedTrajectory] = field(default_factory=list)
+    end_of_data: bool = False              # True when a replay shows its last frame (ReplayBackend); playback stops there
 
 
 @dataclass
