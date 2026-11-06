@@ -13,7 +13,7 @@ Volume experiment (the default, fixed 8 m room, worker defaults for everything e
 
 The legacy form ``--n-crit 35`` still means drones 2..n_crit+1 with all combinations.
 
-Constant-density scaling experiment (grid and formulas in paper2_tools/review_work/density_scaling/density.py):
+Constant-density scaling experiment (grid and formulas in paper2_tools/distributed/density.py):
 
     DRONESIM_DATABASE_URL="..." python -m paper2_tools.distributed.create_queue --experiment density --dry-run
     DRONESIM_DATABASE_URL="..." python -m paper2_tools.distributed.create_queue --experiment density
@@ -34,11 +34,11 @@ from typing import Any
 
 from paper2_tools.distributed.config import CONTROLLERS, COORDINATORS, DENSITY_EXPERIMENT, EXPERIMENTS, VOLUME_EXPERIMENT
 from paper2_tools.distributed.db import count_by_status, count_by_status_sql, ensure_schema, insert_tasks, insert_tasks_sql, make_task
-from paper2_tools.review_work.density_scaling import density
+from paper2_tools.distributed import density
 
 # Options that belong to one experiment only; naming one for the other experiment is an error, not silently ignored.
 _VOLUME_OPTIONS = ("drones", "n_crit", "coordinators", "controllers")
-_DENSITY_OPTIONS = ("dmpc_drones", "central_drones", "admm_iters", "timeout_h", "comm_radius")
+_DENSITY_OPTIONS = ("dmpc_drones", "central_drones", "admm_iters", "timeout_h", "comm_radius", "travel_distance")
 
 
 def parse_drone_range(text: str) -> range:
@@ -91,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
                       help=f"DMPC rounds per step, one cell each (default {','.join(map(str, density.ADMM_ITERS))})")
     dens.add_argument("--timeout-h", type=float, default=None, help=f"timeout per run in hours (default {density.TIMEOUT_S / 3600:g})")
     dens.add_argument("--comm-radius", type=float, default=None, help=f"override r_com (default {density.comm_radius_for():.2f} m)")
+    dens.add_argument("--travel-distance", type=float, default=None, help=f"start-target distance of every drone (default {density.TRAVEL_DISTANCE:g} m)")
     return parser
 
 
@@ -123,6 +124,7 @@ def tasks_from_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -
         admm_iters=density.ADMM_ITERS if args.admm_iters is None else args.admm_iters,
         timeout_s=density.TIMEOUT_S if args.timeout_h is None else int(round(args.timeout_h * 3600)),
         comm_radius=args.comm_radius,
+        travel_distance=density.TRAVEL_DISTANCE if args.travel_distance is None else args.travel_distance,
     )
 
 
@@ -134,14 +136,15 @@ def describe(tasks: list[dict[str, Any]]) -> str:
         cells.setdefault(key, [t, 0])[1] += 1
 
     lines = [f"{'experiment':<10} {'coordinator':<12} {'controller':<20} {'var':<4} {'N':>3} {'room [m]':>8} {'r_com [m]':>9} {'k':>3} "
-             f"{'timeout':>8} {'runs':>4}"]
+             f"{'timeout':>8} {'travel':>6} {'runs':>4}"]
     for (experiment, coordinator, controller, variant, n), (t, count) in cells.items():
         room = "-" if t["room_size"] is None else f"{t['room_size']:.2f}"
         r_com = "-" if t["comm_radius"] is None else f"{t['comm_radius']:.2f}"
         k = "-" if t["max_admm_iter"] is None else str(t["max_admm_iter"])
         timeout = "-" if t["timeout_s"] is None else f"{t['timeout_s'] / 3600:.1f}h"
+        travel = "-" if t["travel_distance"] is None else f"{t['travel_distance']:g}"
         lines.append(f"{experiment:<10} {coordinator:<12} {controller:<20} {variant or '-':<4} {n:>3} {room:>8} {r_com:>9} {k:>3} "
-                     f"{timeout:>8} {count:>4}")
+                     f"{timeout:>8} {travel:>6} {count:>4}")
     lines.append(f"{len(tasks)} tasks ('-' = worker default)")
     return "\n".join(lines)
 

@@ -156,8 +156,8 @@ class TestSqlScript:
       assert out.count("\n    (") == 16
       assert "INSERT INTO scenario_runs (" + ", ".join(db._TASK_COLUMNS) + ")\nVALUES\n" in out
       assert f"ON CONFLICT ON CONSTRAINT {db.TASK_KEY_CONSTRAINT} DO NOTHING;" in out
-      assert "    (0, 2, 'mpc_central', 'mpc_agent', 'volume', '', NULL, NULL, NULL, NULL)," in out
-      assert "    (1, 3, 'dmpc_admm', 'mpc_agent_adaptive', 'volume', '', NULL, NULL, NULL, NULL)\nON CONFLICT" in out
+      assert "    (0, 2, 'mpc_central', 'mpc_agent', 'volume', '', NULL, NULL, NULL, NULL, NULL)," in out
+      assert "    (1, 3, 'dmpc_admm', 'mpc_agent_adaptive', 'volume', '', NULL, NULL, NULL, NULL, NULL)\nON CONFLICT" in out
       assert out.index("BEGIN;") < out.index("INSERT INTO") < out.index("COMMIT;") < out.index(
          "SELECT status, count(*) FROM scenario_runs WHERE experiment = 'volume' GROUP BY status ORDER BY status;")
       assert "Inserted" not in out
@@ -169,8 +169,8 @@ class TestSqlScript:
 
       text = path.read_text()
       assert text.count("\n    (") == 2
-      assert "    (0, 10, 'dmpc_admm', 'mpc_agent_adaptive', 'density', 'k3', 8.0, 7.04, 3, 14400)," in text
-      assert "    (0, 10, 'mpc_central', 'mpc_agent_adaptive', 'density', '', 8.0, NULL, NULL, 14400)\nON CONFLICT" in text
+      assert "    (0, 10, 'dmpc_admm', 'mpc_agent_adaptive', 'density', 'k3', 8.0, 7.04, 3, 43200, 4.0)," in text
+      assert "    (0, 10, 'mpc_central', 'mpc_agent_adaptive', 'density', '', 8.0, NULL, NULL, 43200, 4.0)\nON CONFLICT" in text
       assert text.endswith("WHERE experiment = 'density' GROUP BY status ORDER BY status;\n")
       out, err = capsys.readouterr()
       assert "2 tasks" in out and str(path) in out and err == ""
@@ -199,12 +199,12 @@ class TestInsertTasksSql:
 
    def test_rows_follow_the_task_columns(self):
       task = db.make_task(1, 5, "dmpc_admm", "mpc_agent_adaptive", experiment="density", variant="k3", room_size=16.0, comm_radius=7.04,
-                          max_admm_iter=3, timeout_s=14400)
+                          max_admm_iter=3, timeout_s=14400, travel_distance=4.0)
 
       sql = db.insert_tasks_sql([task])
 
       assert sql.startswith("INSERT INTO scenario_runs (" + ", ".join(db._TASK_COLUMNS) + ")\nVALUES\n")
-      assert "\n    (1, 5, 'dmpc_admm', 'mpc_agent_adaptive', 'density', 'k3', 16.0, 7.04, 3, 14400)\n" in sql
+      assert "\n    (1, 5, 'dmpc_admm', 'mpc_agent_adaptive', 'density', 'k3', 16.0, 7.04, 3, 14400, 4.0)\n" in sql
       assert sql.endswith(f"ON CONFLICT ON CONSTRAINT {db.TASK_KEY_CONSTRAINT} DO NOTHING;")
 
    def test_one_statement_per_page_like_execute_values(self):
@@ -232,7 +232,8 @@ class TestMetricColumns:
    def test_export_starts_with_the_insert_columns(self):
       """Test the export keeps the metric columns in insert order and appends the run settings and the task identity."""
       assert db._EXPORT_FIELDNAMES[:len(db._METRIC_COLUMNS)] == db._METRIC_COLUMNS
-      assert db._EXPORT_FIELDNAMES[len(db._METRIC_COLUMNS):] == ["room_size", "comm_radius", "max_admm_iter", "run_index", "experiment", "variant"]
+      assert db._EXPORT_FIELDNAMES[len(db._METRIC_COLUMNS):] == ["room_size", "comm_radius", "max_admm_iter", "travel_distance", "run_index",
+                                                                 "experiment", "variant"]
       assert db._METRIC_COLUMNS[-len(COST_FIELDNAMES):] == COST_FIELDNAMES
 
    def test_migration_adds_every_cost_column(self):
@@ -245,7 +246,7 @@ class TestMetricColumns:
    def test_migration_adds_the_task_columns(self):
       assert [s.split("EXISTS ")[1].split(" ")[0] for s in db._TASK_PARAM_MIGRATION_SQL.splitlines()] == db._TASK_PARAM_NAMES
       run_columns = [s.split("EXISTS ")[1].split(" ")[0] for s in db._RUNS_MIGRATION_SQL.splitlines()]
-      assert run_columns == ["experiment", "variant", "room_size", "comm_radius", "max_admm_iter", "timeout_s"]
+      assert run_columns == ["experiment", "variant", "room_size", "comm_radius", "max_admm_iter", "timeout_s", "travel_distance"]
       assert "DROP CONSTRAINT IF EXISTS scenario_runs_run_index_n_drones_coordinator_controller_key" in db._TASK_KEY_MIGRATION_SQL
       assert "UNIQUE (run_index, n_drones, coordinator, controller, experiment, variant)" in db._TASK_KEY_MIGRATION_SQL
 
@@ -269,7 +270,7 @@ class TestTasks:
 
       assert list(task) == db._TASK_COLUMNS
       assert task["experiment"] == "volume" and task["variant"] == ""
-      assert all(task[name] is None for name in ("room_size", "comm_radius", "max_admm_iter", "timeout_s"))
+      assert all(task[name] is None for name in ("room_size", "comm_radius", "max_admm_iter", "timeout_s", "travel_distance"))
 
    def test_insert_runs_builds_every_combination(self, monkeypatch):
       captured: dict = {}
