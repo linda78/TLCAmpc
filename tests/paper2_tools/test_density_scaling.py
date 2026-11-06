@@ -1,4 +1,4 @@
-"""Tests for paper2_tools.review_work.density_scaling (todo.md block B).
+"""Tests for paper2_tools.distributed.density and review_work.density_scaling.plot_density (todo.md block B).
 
 The experiment is defined by a few formulas and a task list that the Hetzner workers take as they are, so the numbers in the
 rows have to be exactly the ones the paper will cite: room side per N, comm radius, rounds per cell, timeout, runs. The
@@ -7,11 +7,13 @@ queue CLI (create_queue --experiment density) is tested in test_create_queue.
 
 from __future__ import annotations
 
+import pandas as pd
 import pytest
 
 from paper2_tools.distributed import db
 from paper2_tools.distributed.config import placement_seed
-from paper2_tools.review_work.density_scaling import density
+from paper2_tools.distributed import density
+from paper2_tools.review_work.density_scaling import plot_density
 
 
 class TestFormulas:
@@ -55,8 +57,9 @@ class TestBuildTasks:
 
       assert all(t["experiment"] == "density" for t in tasks)
       assert all(t["controller"] == "mpc_agent_adaptive" for t in tasks)
-      assert all(t["timeout_s"] == 4 * 3600 for t in tasks)
+      assert all(t["timeout_s"] == 12 * 3600 for t in tasks)
       assert all(t["room_size"] == pytest.approx(density.room_size_for(t["n_drones"])) for t in tasks)
+      assert all(t["travel_distance"] == 4.0 for t in tasks)
       assert set(tasks[0]) == set(db._TASK_COLUMNS)
 
    def test_dmpc_tasks_limit_neighbourhood_and_rounds(self):
@@ -81,7 +84,64 @@ class TestBuildTasks:
             assert seeds[("mpc_central", "", n, run)] == seeds[("dmpc_admm", "k1", n, run)] == seeds[("dmpc_admm", "k3", n, run)]
 
    def test_overrides_change_the_grid(self):
-      tasks = density.build_tasks(runs=2, dmpc_drones=(10,), central_drones=(), admm_iters=(5,), timeout_s=60, comm_radius=3.0)
+      tasks = density.build_tasks(runs=2, dmpc_drones=(10,), central_drones=(), admm_iters=(5,), timeout_s=60, comm_radius=3.0, travel_distance=2.5)
 
       assert len(tasks) == 2
+      assert all(t["travel_distance"] == 2.5 for t in tasks)
       assert all(t["max_admm_iter"] == 5 and t["variant"] == "k5" and t["timeout_s"] == 60 and t["comm_radius"] == 3.0 for t in tasks)
+
+
+def _run(n: int, status: str = "finished", steps: int = 100, cpu: float = 100.0, travel: float | None = 4.0) -> dict:
+   """One metrics row of a DMPC k=1 run; local solves take all the CPU time and there is one round per step."""
+   return {"coordinator": "dmpc_admm", "max_admm_iter": 1, "num_drones": n, "room_size": density.room_size_for(n), "status": status, "steps": steps,
+           "cpu_total_s": cpu, "wall_time_s": cpu * 2, "mean_step_time_s": cpu * 2 / max(steps, 1), "admm_iterations": steps, "local_solves": steps * n,
+           "local_solve_cpu_s": cpu, "parallel_step_cpu_s": cpu / n, "travel_distance": travel}
+
+
+class TestScalingTables:
+   """Tests for cell_table and scaling_factors of plot_density."""
+
+   def test_every_cell_is_a_row_even_if_nothing_finished(self):
+      df = plot_density.add_derived(pd.DataFrame([_run(10), _run(10, "deadlock"), _run(20, "timeout", steps=7)]))
+
+      table = plot_density.cell_table(df).set_index("num_drones")
+
+      assert list(table.index) == [10, 20]
+      assert table.loc[10, ["runs", "finished", "deadlock", "timeout"]].tolist() == [2, 1, 1, 0]
+      assert table.loc[20, ["runs", "finished", "deadlock", "timeout"]].tolist() == [1, 0, 0, 1]
+      assert pd.isna(table.loc[20, "run_time_cpu_s"])
+      assert table.loc[20, "step_time_s"] == pytest.approx(100.0 / 7)
+
+   def test_run_time_only_counts_finished_runs(self):
+      df = plot_density.add_derived(pd.DataFrame([_run(10, cpu=100.0), _run(10, "timeout", cpu=9000.0)]))
+
+      assert plot_density.cell_table(df)["run_time_cpu_s"].tolist() == [100.0]
+
+   def test_factors_recover_the_exponent_of_a_power_law(self):
+      """Test time ~ N^2: exponent 2, factor 4 per doubling, x40 = 16 against N = 10."""
+      df = plot_density.add_derived(pd.DataFrame([_run(n, cpu=float(n) ** 2) for n in (10, 20, 40)]))
+
+      factors = plot_density.scaling_factors(plot_density.cell_table(df)).set_index("quantity")
+
+      row = factors.loc["CPU time of a finished run"]
+      assert row["exponent"] == pytest.approx(2.0)
+      assert row["per_doubling"] == pytest.approx(4.0)
+      assert (row["x10"], row["x20"], row["x40"]) == pytest.approx((1.0, 4.0, 16.0))
+
+   def test_flat_time_has_exponent_zero(self):
+      df = plot_density.add_derived(pd.DataFrame([_run(n, cpu=float(n)) for n in (10, 20, 40, 80)]))
+
+      factors = plot_density.scaling_factors(plot_density.cell_table(df)).set_index("quantity")
+
+      assert factors.loc["CPU time per local solve", "exponent"] == pytest.approx(0.0, abs=1e-9)
+
+   def test_a_series_with_one_cell_has_no_factor(self):
+      df = plot_density.add_derived(pd.DataFrame([_run(10)]))
+
+      assert plot_density.scaling_factors(plot_density.cell_table(df)).empty
+
+   def test_rows_without_travel_distance_are_reported_as_mirrored(self):
+      rows = pd.DataFrame([_run(10), _run(10, travel=None)])
+
+      assert plot_density.mirrored_rows(rows) == 1
+      assert plot_density.mirrored_rows(rows.drop(columns="travel_distance")) == 2

@@ -1,8 +1,8 @@
 """Database schema, task claiming, and metrics storage for distributed scenario runs.
 
 A task row of ``scenario_runs`` names its campaign cell by (run_index, n_drones, coordinator, controller, experiment, variant) and
-carries the per-run settings the worker needs beyond its command line: room_size, comm_radius, max_admm_iter and timeout_s.
-NULL means "use the worker default". The volume campaigns (paper 2 revision, paper 3 costs) are experiment 'volume' with an
+carries the per-run settings the worker needs beyond its command line: room_size, comm_radius, max_admm_iter, timeout_s and
+travel_distance. NULL means "use the worker default" (for travel_distance: targets mirrored at the room centre). The volume campaigns (paper 2 revision, paper 3 costs) are experiment 'volume' with an
 empty variant; the constant-density scaling experiment (paper2_tools/review_work/density_scaling) is experiment 'density'.
 """
 
@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS scenario_runs (
     comm_radius     DOUBLE PRECISION,
     max_admm_iter   INTEGER,
     timeout_s       INTEGER,
+    travel_distance DOUBLE PRECISION,
     status          TEXT NOT NULL DEFAULT 'pending',
     claimed_by      TEXT,
     claimed_at      TIMESTAMPTZ,
@@ -88,6 +89,7 @@ _TASK_PARAM_COLUMNS: list[tuple[str, str]] = [
     ("room_size", "DOUBLE PRECISION"),
     ("comm_radius", "DOUBLE PRECISION"),
     ("max_admm_iter", "INTEGER"),
+    ("travel_distance", "DOUBLE PRECISION"),
 ]
 
 # Task columns of scenario_runs that came after the first campaigns.
@@ -98,6 +100,7 @@ _RUN_COLUMNS: list[tuple[str, str]] = [
     ("comm_radius", "DOUBLE PRECISION"),
     ("max_admm_iter", "INTEGER"),
     ("timeout_s", "INTEGER"),
+    ("travel_distance", "DOUBLE PRECISION"),
 ]
 
 _MIGRATION_SQL = "\n".join(f"ALTER TABLE metrics ADD COLUMN IF NOT EXISTS {name} {sql_type};" for name, sql_type in _COST_COLUMNS)
@@ -124,7 +127,8 @@ _BASE_METRIC_COLUMNS = [
 ]
 _METRIC_COLUMNS = _BASE_METRIC_COLUMNS + [name for name, _ in _COST_COLUMNS]
 _TASK_PARAM_NAMES = [name for name, _ in _TASK_PARAM_COLUMNS]
-_TASK_COLUMNS = ["run_index", "n_drones", "coordinator", "controller", "experiment", "variant", "room_size", "comm_radius", "max_admm_iter", "timeout_s"]
+_TASK_COLUMNS = ["run_index", "n_drones", "coordinator", "controller", "experiment", "variant", "room_size", "comm_radius", "max_admm_iter", "timeout_s",
+                 "travel_distance"]
 _INSERT_PAGE_SIZE = 500  # task rows per INSERT statement, for execute_values and for the SQL script alike
 _COUNT_BY_STATUS_SQL = "SELECT status, count(*) FROM scenario_runs{where} GROUP BY status ORDER BY status"
 
@@ -151,10 +155,11 @@ def ensure_schema() -> None:
 
 def make_task(run_index: int, n_drones: int, coordinator: str, controller: str, *, experiment: str = VOLUME_EXPERIMENT, variant: str = "",
               room_size: float | None = None, comm_radius: float | None = None, max_admm_iter: int | None = None,
-              timeout_s: int | None = None) -> dict[str, Any]:
+              timeout_s: int | None = None, travel_distance: float | None = None) -> dict[str, Any]:
     """One queue row. A None setting means the worker default."""
     return {"run_index": run_index, "n_drones": n_drones, "coordinator": coordinator, "controller": controller, "experiment": experiment,
-            "variant": variant, "room_size": room_size, "comm_radius": comm_radius, "max_admm_iter": max_admm_iter, "timeout_s": timeout_s}
+            "variant": variant, "room_size": room_size, "comm_radius": comm_radius, "max_admm_iter": max_admm_iter, "timeout_s": timeout_s,
+            "travel_distance": travel_distance}
 
 
 def insert_tasks(tasks: list[dict[str, Any]]) -> int:
@@ -279,8 +284,8 @@ def claim_task() -> dict[str, Any] | None:
 def insert_metrics(scenario_run_id: int, row: dict[str, Any], task_params: dict[str, Any] | None = None) -> None:
     """Insert a metrics row linked to the scenario run.
 
-    Cost columns missing from ``row`` are stored as NULL. ``task_params`` holds the effective room_size, comm_radius and
-    max_admm_iter of the run (see worker.resolve_task_settings); without it those columns stay NULL.
+    Cost columns missing from ``row`` are stored as NULL. ``task_params`` holds the effective room_size, comm_radius,
+    max_admm_iter and travel_distance of the run (see worker.resolve_task_settings); without it those columns stay NULL.
     """
     columns = ["scenario_run_id", *_METRIC_COLUMNS, *_TASK_PARAM_NAMES]
     sql = f"INSERT INTO metrics ({', '.join(columns)}) VALUES ({', '.join(['%s'] * len(columns))})"

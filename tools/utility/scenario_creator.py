@@ -1,6 +1,6 @@
 from drone_sim.domain.config import ControllerSpec, PhysicsSpec, RoomConfig, ScenarioConfig, DroneConfig, ObstacleConfig
 from tools.utility import COLOR_BY_DRONE_INDEX
-from tools.utility.generate_sphere_positions import generate_positions
+from tools.utility.generate_sphere_positions import generate_fixed_travel_positions, generate_positions
 
 
 def create_scenario(dt: float = 0.1, # simulation & coordinator
@@ -13,6 +13,7 @@ def create_scenario(dt: float = 0.1, # simulation & coordinator
                     comm_radius: float | None = None, # DMPC neighbourhood: None = every drone is a neighbour of every other
                     max_admm_iter: int = 20, # DMPC rounds per step
                     terminal_constraint: bool = True, # braking-distance terminal radius at the last horizon step (room walls); False = behaviour of runs before 22.10.2026
+                    travel_distance: float | None = None, # start-target distance of every drone in a random direction; None = targets mirrored at the room centre
                     ) -> ScenarioConfig:
    physics = create_physics(v_max=physics_v, u_max=physics_u)
    if controller_type == "mpc_agent":
@@ -32,7 +33,10 @@ def create_scenario(dt: float = 0.1, # simulation & coordinator
       raise ValueError("Unknown coordinator type: %s", coordinator_type)
 
    room = RoomConfig(min=[-room_size/2, -room_size/2, -room_size/2], max=[room_size/2, room_size/2, room_size/2])
-   if waypoints is None:
+   if waypoints is None and travel_distance is not None:
+      waypoints = generate_fixed_travel_positions(n_drones=n_drones, room_min=room.min, room_max=room.max, travel_distance=travel_distance,
+                                                  min_pair_distance=safety_zone*2, wall_margin=safety_zone)
+   elif waypoints is None:
       waypoints = generate_positions(n_drones=n_drones, room_min=room.min, room_max=room.max, min_pair_distance=safety_zone*2, wall_margin=safety_zone)
    drones = [DroneConfig(drone_id=f"drone-{i}", start=waypoints[i][0], target=waypoints[i][1], controller=controller, physics="default", alpha=alpha_set,
                          radius=drones_radius, safety_zone=safety_zone, cons_stop=0.0, drone_color=COLOR_BY_DRONE_INDEX[i + 1]) for i in range(n_drones)]
