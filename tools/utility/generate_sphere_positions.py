@@ -120,16 +120,12 @@ def _calc_best_format(room_size: float, r: float) -> tuple[float, np.ndarray]:
    return min_dist, positions_array
 
 
-def _generate_positions_in_box(n_drones: int, room_min: np.ndarray, room_max: np.ndarray, min_pair_distance: float = 2.41, wall_margin: float = 1.0,
-                               max_attempts: int = 100000) -> StartDestPattern | None:
-   """Generate random non-overlapping positions within a box-shaped room."""
-   inner_min = room_min + wall_margin
-   inner_max = room_max - wall_margin
-
+def _sample_points_in_box(n_points: int, inner_min: np.ndarray, inner_max: np.ndarray, min_pair_distance: float, max_attempts: int) -> np.ndarray:
+   """Uniform random points at least ``min_pair_distance`` apart; fewer than ``n_points`` if the attempts run out."""
    positions = np.empty((0, 3))
 
    for _ in range(max_attempts):
-      if len(positions) >= n_drones:
+      if len(positions) >= n_points:
          break
 
       point = np.random.uniform(inner_min, inner_max)
@@ -137,6 +133,14 @@ def _generate_positions_in_box(n_drones: int, room_min: np.ndarray, room_max: np
       # Check distance to all existing positions
       if len(positions) == 0 or np.min(np.linalg.norm(positions - point, axis=1)) >= min_pair_distance:
          positions = np.vstack([positions, point])
+
+   return positions
+
+
+def _generate_positions_in_box(n_drones: int, room_min: np.ndarray, room_max: np.ndarray, min_pair_distance: float = 2.41, wall_margin: float = 1.0,
+                               max_attempts: int = 100000) -> StartDestPattern | None:
+   """Generate random non-overlapping positions within a box-shaped room."""
+   positions = _sample_points_in_box(n_drones, room_min + wall_margin, room_max - wall_margin, min_pair_distance, max_attempts)
 
    if len(positions) < n_drones:
       # In cubic room, we may have fallback options
@@ -200,6 +204,37 @@ def generate_positions(n_drones: int, room_min: list[float] = list, room_max: li
    if results is None:
       raise DronePlacementError(n_drones=n_drones, r_room=r_room, r_sphere=min_pair_distance / 2)
    return results
+
+
+def generate_fixed_travel_positions(n_drones: int, room_min: list[float], room_max: list[float], travel_distance: float, min_pair_distance: float = 2.41,
+                                    wall_margin: float = 1.0, max_attempts: int = 100000) -> StartDestPattern:
+   """Uniform starts, each target ``travel_distance`` from its start in a random direction.
+
+   Mirrored targets send every drone through the room centre, so the density there grows with N even when the room grows with N.
+   Here the fleet stays spread over the room for the whole flight and the way of a drone does not depend on N. Targets keep
+   ``wall_margin`` and ``min_pair_distance`` like the starts.
+   """
+   inner_min = np.array(room_min) + wall_margin
+   inner_max = np.array(room_max) - wall_margin
+   failure = DronePlacementError(n_drones=n_drones, r_room=0.0, r_sphere=min_pair_distance / 2)
+
+   starts = _sample_points_in_box(n_drones, inner_min, inner_max, min_pair_distance, max_attempts)
+   if len(starts) < n_drones:
+      raise failure
+
+   targets = np.empty((0, 3))
+   for start in starts:
+      for _ in range(max_attempts):
+         direction = np.random.normal(size=3)
+         target = start + travel_distance * direction / np.linalg.norm(direction)
+         inside = np.all(target >= inner_min) and np.all(target <= inner_max)
+         if inside and (len(targets) == 0 or np.min(np.linalg.norm(targets - target, axis=1)) >= min_pair_distance):
+            targets = np.vstack([targets, target])
+            break
+      else:
+         raise failure
+
+   return [(start.tolist(), target.tolist()) for start, target in zip(starts, targets)]
 
 
 def predefined_patterns_for(n_drones: int, r_sphere: float, room_size: float, in_sphere: bool = False) -> StartDestPattern | None:

@@ -46,4 +46,11 @@ class TestResolveTaskSettings:
       settings = resolve_task_settings({"coordinator": "dmpc_admm", "comm_radius": 7.04, "max_admm_iter": 3}, room_size=8.0)
 
       assert list(settings.as_metrics()) == db._TASK_PARAM_NAMES
-      assert settings.as_metrics() == {"room_size": 8.0, "comm_radius": 7.04, "max_admm_iter": 3}
+      assert settings.as_metrics() == {"room_size": 8.0, "comm_radius": 7.04, "max_admm_iter": 3, "travel_distance": None}
+
+   def test_travel_distance_comes_from_the_task_for_both_coordinators(self):
+      for coordinator in ("dmpc_admm", "mpc_central"):
+         assert resolve_task_settings({"coordinator": coordinator, "travel_distance": 4.0}, room_size=8.0).travel_distance == 4.0
+
+   def test_without_travel_distance_the_targets_stay_mirrored(self):
+      assert resolve_task_settings({"coordinator": "dmpc_admm", "travel_distance": None}, room_size=8.0).travel_distance is None
