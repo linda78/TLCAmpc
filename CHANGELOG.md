@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/).
 
 
+## [v3.0] — 2026-04-08 (LSTM Trajectory Prediction with VAE)
+
+### Added
+- LSTM-based neighbor trajectory prediction (AV-LSTM model)
+- Variational Autoencoder (VAE) bottleneck with latent space z, reparameterization trick
+- ELBO loss: NLL reconstruction + beta-weighted KL divergence regularization
+- Uncertainty propagation from model sigma to per-step safety radii
+- `LSTMSafetyZoneProvider` for real-time LSTM inference in the MPC loop
+- `TrajectoryHistoryBuffer` (thread-safe ring buffer for state history)
+- `UncertaintyPropagator` converting model sigma to safety radii via chi-squared bound
+- `safety_zone_mode` field on Drone: "fixed", "adaptive", or "lstm"
+- `lstm_radii` parameter threaded through all coordinators and constraint classes
+- `lstm_provider` parameter on all `solve_controls()` methods
+- Training pipeline: `AVLSTMTrainer` with GaussianNLLLoss, scheduled sampling, KL annealing
+- Data generation pipeline: `DataGenerator` + `tools/generate_data.py` CLI
+- Training CLI: `tools/train_lstm.py` with `--d-z` and `--beta` arguments
+- LSTM scenario configs (`configs/lstm/`)
+- New experiment scenarios for scalability and runtime analysis (reviewer feedback)
+
+### Changed
+- `AVLSTMModel.forward()` returns 4-tuple `(mu, sigma, mu_z, logvar_z)` instead of 2-tuple
+- h0/c0 LSTM init derived from latent z instead of direct encoder pooling
+- `ConflictEvasionCentralCoordinator` and `ConflictEvasionDistributedCoordinator` accept `lstm_provider`
+- Collision constraint evaluation uses per-step `_safety_radius()` with LSTM branch
+
+### Breaking Changes
+- Existing `.pt` model checkpoints are incompatible (new VAE layers, changed h_init/c_init dims)
+- Models must be retrained with the new architecture
+
 ## [v2.2.2] — 2026-11-04 (IEEE T-ASE Revision)
 
 Changes made in response to the reviews: a braking-distance terminal constraint for the MPC horizon,
