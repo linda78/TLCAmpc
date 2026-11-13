@@ -231,7 +231,7 @@ __marimo__/
 **/*.md
 *.json
 #tools/*
-#paper2_tools/*
+paper2_tools/*
 doc/*
 results/*
 logs/*
