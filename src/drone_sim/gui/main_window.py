@@ -496,7 +496,6 @@ class MainWindow(QMainWindow):
             if trace:
                 draw_trace(ax, trace, drone.trace_color)
 
-<<<<<<< Updated upstream
         # BoF prediction tubes (mirror live view: outer safety halo + inner body tube).
         #  TODO: refactor, it should not be needed to implement that stuff twice!
         for pred in result.predictions:
@@ -521,21 +520,8 @@ class MainWindow(QMainWindow):
                 draw_centerline=True,
             )
 
-        # Axis limits (match live view zoom)
-        room_min, room_max = sim_state.room_min, sim_state.room_max
-        cx = (room_min[0] + room_max[0]) / 2
-        cy = (room_min[1] + room_max[1]) / 2
-        cz = (room_min[2] + room_max[2]) / 2
-        hx = (room_max[0] - room_min[0]) / 2 * self._zoom
-        hy = (room_max[1] - room_min[1]) / 2 * self._zoom
-        hz = (room_max[2] - room_min[2]) / 2 * self._zoom
-        ax.set_xlim(cx - hx, cx + hx)
-        ax.set_ylim(cy - hy, cy + hy)
-        ax.set_zlim(cz - hz, cz + hz)
-=======
         # Same camera view as the live canvas (zoom and pan)
         self._apply_view_to(ax, ax.get_position(original=True).frozen(), sim_state.room_min, sim_state.room_max)
->>>>>>> Stashed changes
         ax.set_xlabel("x")
         ax.set_ylabel("y")
         ax.set_zlabel("z")
