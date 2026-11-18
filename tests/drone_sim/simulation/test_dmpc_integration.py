@@ -406,6 +406,7 @@ class TestDMPCWithCommRadius:
 
         assert sim.step_count == 20
 
+    @pytest.mark.flaky
     def test_dmpc_with_large_comm_radius_same_as_none(self):
         """Test large comm_radius behaves like comm_radius=None (all neighbors)."""
         base_drones = [

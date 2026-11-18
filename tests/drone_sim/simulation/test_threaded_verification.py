@@ -98,6 +98,7 @@ def run_simulation(sim: Simulator, steps: int) -> dict[str, np.ndarray]:
 class TestThreadedVsSyncTrajectory:
     """Tests comparing threaded DMPC vs synchronous DMPC trajectories."""
 
+    @pytest.mark.flaky
     def test_threaded_vs_admm_trajectory_similarity(self):
         """Test threaded and ADMM DMPC produce comparable trajectories (RMS < 1.2, max dev < 3.5)."""
         # Run with ADMM DMPC

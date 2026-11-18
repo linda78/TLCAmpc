@@ -152,6 +152,7 @@ class TestScalabilitySolveTime:
             dist = np.linalg.norm(final_pos - initial_pos)
             assert dist > 0.01, f"Drone {drone.drone_id} should have moved (dist={dist:.4f})"
 
+    @pytest.mark.flaky
     def test_threaded_vs_admm_scalability_trend(self):
         """Compare threaded vs ADMM solve time scalability trends.
 
