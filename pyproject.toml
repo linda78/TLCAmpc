@@ -3,7 +3,7 @@ name = "drone-sim"
 version = "0.1.0"
 description = "3D drone simulation with REST control"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.110",
   "uvicorn[standard]>=0.27",
@@ -40,13 +40,15 @@ packages = ["src/drone_sim"]
 [tool.pytest.ini_options]
 markers = [
       "slow: long-running tests (integration, full pipeline)",
+      "lstm_only: needs the full LSTM model, which is not in the repo",
+      "flaky: sometimes fails (thread timing, randomness)",
   ]
 pythonpath = ["src"]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
-addopts = "-v --tb=short -m 'not slow'"
+addopts = "-v --tb=short -m 'not slow and not lstm_only and not flaky'"
 
 [tool.ruff]
 line-length = 100

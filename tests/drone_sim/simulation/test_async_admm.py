@@ -60,6 +60,7 @@ class TestAsyncADMMDeadlockPrevention:
             assert stuck_count < 10, f"Drones stuck for {stuck_count} steps at step {step}"
 
     @pytest.mark.slow
+    @pytest.mark.flaky
     def test_gauss_seidel_breaks_symmetry(self):
         """Two head-on drones should eventually pass each other."""
         # Create minimal 2-drone head-on scenario

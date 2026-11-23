@@ -79,6 +79,7 @@ def _goal_reaching_rate(sim: Simulator) -> float:
     _CONFIG_FILES,
     ids=[Path(p).name for p in _CONFIG_FILES],
 )
+@pytest.mark.lstm_only
 def test_no_hard_collisions(config_path: str) -> None:
     """LSTM mode produces zero physical body overlaps across full simulation run."""
     with open(config_path) as f:
